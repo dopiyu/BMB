@@ -38,6 +38,10 @@ const ICON = {
   chev: '<path d="m9 6 6 6-6 6"/>',
   left: '<path d="m15 6-6 6 6 6"/>',
   down: '<path d="m6 9 6 6 6-6"/>',
+  sun: '<circle cx="12" cy="12" r="4"/><path d="M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4"/>',
+  moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
+  dl: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/>',
+  phone: '<rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M11 18h2"/>',
   spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
 };
 const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON[n]}</svg>`;
@@ -49,13 +53,51 @@ function toast(msg, kind = 'ok') {
   toast.t = setTimeout(() => (toastEl.className = 'toast'), 2600);
 }
 
+/* ---------- theme ---------- */
+const prefersDark = window.matchMedia('(prefers-color-scheme: dark)');
+const savedTheme = () => { try { const t = localStorage.getItem('bmb-theme'); return t === 'light' || t === 'dark' ? t : null; } catch { return null; } };
+const isDark = () => (savedTheme() || (prefersDark.matches ? 'dark' : 'light')) === 'dark';
+function applyTheme() {
+  const t = savedTheme();
+  if (t) document.documentElement.setAttribute('data-theme', t); else document.documentElement.removeAttribute('data-theme');
+  document.getElementById('theme-color')?.setAttribute('content', isDark() ? '#0E1013' : '#F3F4F6');
+}
+function toggleTheme() {
+  try { localStorage.setItem('bmb-theme', isDark() ? 'light' : 'dark'); } catch {}
+  applyTheme(); render();
+}
+prefersDark.addEventListener?.('change', () => { applyTheme(); render(); });
+const themeBtn = () => `<div class="topbar"><button type="button" class="theme-btn" data-act="theme" aria-label="Switch to ${isDark() ? 'light' : 'dark'} mode" title="Switch to ${isDark() ? 'light' : 'dark'} mode">${ic(isDark() ? 'sun' : 'moon')}</button></div>`;
+
+/* ---------- install (PWA) ---------- */
+let installPrompt = null;
+window.addEventListener('beforeinstallprompt', (e) => { e.preventDefault(); installPrompt = e; if (!S.user) render(); });
+window.addEventListener('appinstalled', () => { installPrompt = null; toast('App installed. Open it from your home screen.'); render(); });
+const isStandalone = () => window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
+const isIOS = () => /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+
+/* ---------- 30-day sign-in ---------- */
+const SESSION_DAYS = 30;
+function sessionExpired(u) {
+  if (!u || !u.lastSignIn) return false;
+  const t = Date.parse(u.lastSignIn);
+  return Number.isFinite(t) && Date.now() - t > SESSION_DAYS * 864e5;
+}
+async function enforceExpiry() {
+  if (!sessionExpired(S.user)) return false;
+  S.authNote = `For your security, you're signed out every ${SESSION_DAYS} days. Sign in with Google to carry on. Your workouts are safe.`;
+  S.unsub?.();
+  await store.signOut();
+  return true;
+}
+
 /* ---------- state ---------- */
 const store = createStore();
 const ROUTES = ['home', 'history', 'progress', 'profile'];
 const routeFromHash = () => { const h = location.hash.replace('#', ''); return ROUTES.includes(h) ? h : 'home'; };
 
 const S = {
-  user: null, authReady: false, authErr: '', signingIn: false,
+  user: null, authReady: false, authErr: '', authNote: '', signingIn: false, installOpen: false,
   sessions: [], loaded: false, unsub: null,
   route: routeFromHash(),
   draft: null, saving: false, formErr: '',
@@ -102,7 +144,7 @@ function render() {
   navEl.hidden = false;
   renderNav();
   const view = { home: homeView, history: historyView, progress: progressView, profile: profileView }[S.route];
-  app.innerHTML = `<main class="page" id="page">${view()}</main>`;
+  app.innerHTML = `<main class="page" id="page">${themeBtn()}${view()}</main>`;
   renderSheet();
 }
 
@@ -113,13 +155,27 @@ function renderNav() {
 const markSVG = () => `<svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="24" width="8" height="16" rx="2"/><rect x="14" y="18" width="8" height="28" rx="2"/><rect x="22" y="29" width="20" height="6" rx="2"/><rect x="42" y="18" width="8" height="28" rx="2"/><rect x="50" y="24" width="8" height="16" rx="2"/></svg>`;
 
 function loginView() {
+  const ios = isIOS();
+  const iosSteps = `<div><h3>${ic('phone')} iPhone or iPad${ios ? ' <span class="tag-me">Your phone</span>' : ''}</h3>
+    <ol><li>Open this page in <b>Safari</b>.</li><li>Tap the <b>Share</b> button (square with an arrow) at the bottom.</li><li>Scroll down and tap <b>Add to Home Screen</b>, then <b>Add</b>.</li></ol></div>`;
+  const androidSteps = `<div><h3>${ic('phone')} Android${!ios ? ' <span class="tag-me">Your phone</span>' : ''}</h3>
+    <ol><li>Open this page in <b>Chrome</b>.</li><li>Tap <b>⋮</b> at the top right.</li><li>Tap <b>Install app</b> (or <b>Add to Home screen</b>), then <b>Install</b>.</li></ol></div>`;
+  const help = `<div class="install-help" id="install-help">
+    ${installPrompt ? `<button type="button" class="btn primary block" data-act="installNow">${ic('dl')} Install now</button><p class="fine center">Or add it by hand:</p>` : ''}
+    ${ios ? iosSteps + '<div class="sep"></div>' + androidSteps : androidSteps + '<div class="sep"></div>' + iosSteps}
+    <p class="fine">It opens full screen from your home screen, like any other app. Nothing to download from an app store.</p>
+  </div>`;
   return `<section class="login">
+    ${themeBtn()}
     <div class="login-top">
       <div class="mark big">${markSVG()}</div>
       <h1 class="brand">Build My<br>Bicep</h1>
+      <p class="login-sub">AI-powered workout buddy for first timers</p>
       <p class="tag">Log every set. See every muscle you hit. Get a target for each lift, every session.</p>
     </div>
     <div class="login-card">
+      ${S.authNote ? `<div class="banner info" role="status">${esc(S.authNote)}</div>` : ''}
+      ${isStandalone() ? '' : `<button type="button" class="btn block" data-act="install" aria-expanded="${S.installOpen}" aria-controls="install-help">${ic('dl')} Download app</button>${S.installOpen ? help : ''}`}
       <button type="button" class="gbtn" data-act="signin" ${S.signingIn ? 'disabled' : ''}>
         <svg viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="m6.3 14.7 6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.2 0-9.6-3.3-11.3-7.9l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
         <span>${S.signingIn ? 'Opening Google…' : 'Continue with Google'}</span>
@@ -473,8 +529,13 @@ app.addEventListener('click', async (ev) => {
   const b = ev.target.closest('[data-act]'); if (!b) return;
   const act = b.dataset.act, i = +b.dataset.i, j = +b.dataset.j, d = S.draft;
   switch (act) {
+    case 'theme': toggleTheme(); return;
+    case 'install': S.installOpen = !S.installOpen; render(); return;
+    case 'installNow':
+      if (installPrompt) { installPrompt.prompt(); try { await installPrompt.userChoice; } catch {} installPrompt = null; render(); }
+      return;
     case 'signin':
-      S.authErr = ''; S.signingIn = true; render();
+      S.authErr = ''; S.authNote = ''; S.signingIn = true; render();
       try { await store.signIn(); } catch (e) { S.authErr = e?.code === 'auth/unauthorized-domain' ? 'This domain isn\'t allowed in Firebase yet. Add it under Authentication → Settings → Authorized domains.' : 'Sign-in didn\'t finish. Try again.'; }
       S.signingIn = false; render(); return;
     case 'type':
@@ -595,9 +656,13 @@ function exportText() {
 }
 
 /* ---------- boot ---------- */
+applyTheme();
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') enforceExpiry(); });
+setInterval(enforceExpiry, 60 * 60 * 1000);
 window.addEventListener('hashchange', () => { S.route = routeFromHash(); S.sheet = null; render(); window.scrollTo({ top: 0 }); });
 
-store.onAuth((u) => {
+store.onAuth(async (u) => {
+  if (u && sessionExpired(u)) { S.user = u; await enforceExpiry(); return; }
   S.authReady = true; S.user = u;
   S.unsub?.(); S.unsub = null; S.sessions = []; S.loaded = false;
   if (u) {

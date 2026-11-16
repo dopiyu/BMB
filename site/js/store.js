@@ -22,11 +22,15 @@ function demoStore() {
   return {
     onAuth(cb) {
       authCb = cb;
-      let signed = false;
-      try { signed = localStorage.getItem(AUTH) === '1'; } catch {}
-      setTimeout(() => cb(signed ? user : null), 0);
+      let signed = false, at = null;
+      try { signed = localStorage.getItem(AUTH) === '1'; at = localStorage.getItem(AUTH + '-at'); } catch {}
+      setTimeout(() => cb(signed ? { ...user, lastSignIn: at } : null), 0);
     },
-    async signIn() { try { localStorage.setItem(AUTH, '1'); } catch {} authCb(user); },
+    async signIn() {
+      const at = new Date().toISOString();
+      try { localStorage.setItem(AUTH, '1'); localStorage.setItem(AUTH + '-at', at); } catch {}
+      authCb({ ...user, lastSignIn: at });
+    },
     async signOut() { try { localStorage.removeItem(AUTH); } catch {} authCb(null); },
     watchSessions(cb) { listeners.add(cb); setTimeout(() => cb(read()), 0); return () => listeners.delete(cb); },
     async save(s) { const a = read().filter((x) => x.id !== s.id); a.push(clean(s)); write(a); emit(); },
@@ -68,7 +72,7 @@ function firebaseStore() {
             name: u.displayName || '', email: u.email || '', lastSignIn: new Date().toISOString(),
           }, { merge: true }).catch(() => {});
         }
-        cb(u ? { uid: u.uid, displayName: u.displayName, email: u.email, photoURL: u.photoURL } : null);
+        cb(u ? { uid: u.uid, displayName: u.displayName, email: u.email, photoURL: u.photoURL, lastSignIn: u.metadata?.lastSignInTime || null } : null);
       });
     },
     async signIn() {
