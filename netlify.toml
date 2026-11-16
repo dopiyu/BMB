@@ -1,0 +1,8 @@
+# Netlify builds from GitHub: every merge to main goes live, every pull request gets a preview link.
+[build]
+  publish = "site"
+  # Stamp the service worker with this deploy's commit so installed phones fetch the new version.
+  command = "sed -i \"s/bmb-dev/bmb-${COMMIT_REF:-local}/\" site/sw.js"
+
+[context.deploy-preview]
+  command = "sed -i \"s/bmb-dev/bmb-preview-${COMMIT_REF:-local}/\" site/sw.js"

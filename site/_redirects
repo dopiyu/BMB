@@ -1,0 +1,3 @@
+# Google sign-in runs through your own domain so it works inside the installed app.
+# Firebase project: bmb---pwa
+/__/auth/*  https://bmb---pwa.firebaseapp.com/__/auth/:splat  200!

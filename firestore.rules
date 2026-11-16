@@ -1,0 +1,18 @@
+rules_version = '2';
+
+// Each person can read and write only their own data.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+
+      match /sessions/{sessionId} {
+        allow read, delete: if request.auth != null && request.auth.uid == uid;
+        allow create, update: if request.auth != null && request.auth.uid == uid
+          && request.resource.data.date is string
+          && request.resource.data.exercises is list
+          && request.resource.data.exercises.size() <= 40;
+      }
+    }
+  }
+}

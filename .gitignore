@@ -1,0 +1,5 @@
+# Personal workout backups never go in the repo
+*backup*.json
+*history*.json
+.DS_Store
+node_modules/
