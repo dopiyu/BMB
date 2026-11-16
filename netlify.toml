@@ -6,3 +6,9 @@
 
 [context.deploy-preview]
   command = "sed -i \"s/bmb-dev/bmb-preview-${COMMIT_REF:-local}/\" site/sw.js"
+
+# The Firebase web apiKey is meant to be public (it ships in every Firebase web app;
+# Firestore rules protect the data). Tell Netlify's secret scanner it's expected.
+[build.environment]
+  SECRETS_SCAN_OMIT_PATHS = "site/js/firebase-config.js"
+  SECRETS_SCAN_SMART_DETECTION_OMIT_VALUES = "AIzaSyBJEGqMMw9IMAq9OySS7kDTvXK91dErFQ8"
