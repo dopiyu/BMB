@@ -11,7 +11,7 @@
   color-scheme: light;
 }
 @media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
+  :root {
     --bg: #0E1013; --surface: #171A1E; --surface-2: #20242A; --ink: #ECEEF1; --muted: #9AA2AD; --line: #2A2F36;
     --accent: #FF6A33; --accent-ink: #160A04; --accent-soft: #3A1D10;
     --plate: #1E2227; --plate-ink: #F5F6F7; --plate-muted: #A7AEB8; --plate-line: #343940;
@@ -20,15 +20,6 @@
     --m0: #262A31; --m-line: #3A3F47; --sil: #1D2025;
     color-scheme: dark;
   }
-}
-:root[data-theme="dark"] {
-    --bg: #0E1013; --surface: #171A1E; --surface-2: #20242A; --ink: #ECEEF1; --muted: #9AA2AD; --line: #2A2F36;
-    --accent: #FF6A33; --accent-ink: #160A04; --accent-soft: #3A1D10;
-    --plate: #1E2227; --plate-ink: #F5F6F7; --plate-muted: #A7AEB8; --plate-line: #343940;
-    --good: #5BD39A; --good-soft: #12301F; --warn: #F2B266; --warn-soft: #34240F; --bad: #FF8A80; --bad-soft: #3A1614;
-    --glass: rgba(28, 31, 36, .62); --glass-line: rgba(255, 255, 255, .10);
-    --m0: #262A31; --m-line: #3A3F47; --sil: #1D2025;
-    color-scheme: dark;
 }
 * { box-sizing: border-box; }
 html, body { margin: 0; }
@@ -266,19 +257,3 @@ svg.body .lab.sel text { font-weight: 700; }
 .sets.time, .sets.bodyweight { grid-template-columns: 26px minmax(0, 1fr) 0 minmax(76px, auto) 40px; }
 .err-card { border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
 .err-card h3 { color: var(--bad); }
-
-/* top bar with theme toggle */
-.topbar { display: flex; justify-content: flex-end; margin-bottom: -8px; }
-.theme-btn { width: 44px; height: 44px; border-radius: 14px; border: 1px solid var(--line); background: var(--surface); color: var(--ink); display: grid; place-items: center; }
-.theme-btn .ic { width: 20px; height: 20px; }
-.login .topbar { margin: -24px 0 0; }
-
-/* login: download app */
-.login-sub { margin: 0; font-size: 19px; font-weight: 600; color: var(--accent); max-width: 30ch; }
-.install-help { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
-.install-help h3 { font-size: 15px; display: flex; align-items: center; gap: 8px; }
-.install-help ol { margin: 0; padding-left: 20px; display: flex; flex-direction: column; gap: 4px; font-size: 14px; }
-.install-help .tag-me { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); }
-.install-help .sep { border-top: 1px solid var(--line); }
-.note { margin: 0; font-size: 14px; }
-.banner.info { background: var(--accent-soft); color: var(--ink); }
