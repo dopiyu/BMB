@@ -132,7 +132,20 @@ function loginView() {
 }
 
 /* ----- home ----- */
+const LOAD_ERR = {
+  'permission-denied': ['Firebase is blocking access to your data.', 'In Firebase, go to Firestore → Rules, paste in the contents of firestore.rules, then Publish.'],
+  'failed-precondition': ['The Firestore database isn\'t set up yet.', 'In Firebase, go to Databases and storage → Firestore → Create database. Keep the ID as (default).'],
+  'not-found': ['The Firestore database isn\'t set up yet.', 'In Firebase, go to Databases and storage → Firestore → Create database. Keep the ID as (default).'],
+  'unavailable': ['You\'re offline.', 'Sessions will load when you\'re back online.'],
+  'unauthenticated': ['Your sign-in has expired.', 'Log out from Profile, then sign in again.'],
+};
+function errorCard() {
+  const [title, fix] = LOAD_ERR[S.loadErr] || ['Couldn\'t load your sessions.', 'Check your connection and try again.'];
+  return `<section class="card err-card" role="alert"><h3>${title}</h3><p class="muted">${fix}</p><p class="fine">Error code: ${esc(S.loadErr)}</p><button type="button" class="btn primary" data-act="retry">Try again</button></section>`;
+}
+
 function homeView() {
+  if (S.loadErr) return errorCard();
   if (!S.loaded) return `<div class="empty">Loading your sessions…</div>`;
   const d = S.draft;
   const first = (S.user.displayName || '').split(' ')[0] || 'there';
@@ -252,6 +265,7 @@ function shift(mode, anchor, dir) {
 }
 
 function historyView() {
+  if (S.loadErr) return errorCard();
   const H = S.hist;
   const [a, b, label] = rangeFor(H.mode, H.anchor);
   const list = sorted().filter((s) => s.date >= a && s.date <= b);
@@ -301,6 +315,7 @@ function logItem(s) {
 
 /* ----- progress ----- */
 function progressView() {
+  if (S.loadErr) return errorCard();
   const P = S.prog;
   const all = sorted();
   let list = all;
@@ -480,6 +495,7 @@ app.addEventListener('click', async (ev) => {
     case 'discard': clearDraft(); S.draft = newDraft(nextType(S.sessions)); S.formErr = ''; window.scrollTo({ top: 0 }); render(); return;
     case 'save': await save(); return;
     case 'go': location.hash = b.dataset.r; return;
+    case 'retry': S.unsub?.(); S.loaded = false; S.loadErr = null; render(); subscribe(); return;
     case 'hmode': S.hist.mode = b.dataset.m; S.hist.confirm = null; break;
     case 'hprev': S.hist.anchor = shift(S.hist.mode, S.hist.anchor, -1); break;
     case 'hnext': S.hist.anchor = shift(S.hist.mode, S.hist.anchor, 1); break;
@@ -586,16 +602,26 @@ store.onAuth((u) => {
   S.unsub?.(); S.unsub = null; S.sessions = []; S.loaded = false;
   if (u) {
     S.draft = null;
+    subscribe();
+  }
+  render();
+});
+
+function subscribe() {
+    S.loadErr = null;
     S.unsub = store.watchSessions((list) => {
+      S.loadErr = null;
       S.sessions = list.filter((s) => s && s.date);
       const first = !S.loaded; S.loaded = true;
       if (first || !S.draft) S.draft = loadDraft();
       const typing = S.route === 'home' && document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && app.contains(document.activeElement);
       if (!typing || first) render();
-    }, () => { S.loaded = true; toast('Couldn\'t load your sessions. Check your connection.', 'bad'); render(); });
-  }
-  render();
-});
+    }, (err) => {
+      S.loaded = true; S.loadErr = (err && err.code) || 'unknown';
+      if (!S.draft) S.draft = loadDraft();
+      render();
+    });
+}
 render();
 
 if ('serviceWorker' in navigator && location.protocol === 'https:') {

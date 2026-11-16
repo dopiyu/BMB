@@ -255,3 +255,5 @@ svg.body .lab.sel text { font-weight: 700; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 .sets.time, .sets.bodyweight { grid-template-columns: 26px minmax(0, 1fr) 0 minmax(76px, auto) 40px; }
+.err-card { border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); }
+.err-card h3 { color: var(--bad); }
