@@ -659,11 +659,17 @@ function exportText() {
 applyTheme();
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') enforceExpiry(); });
 setInterval(enforceExpiry, 60 * 60 * 1000);
-window.addEventListener('hashchange', () => { S.route = routeFromHash(); S.sheet = null; render(); window.scrollTo({ top: 0 }); });
+// Tell Google Tag Manager about screen changes (Home, History, Progress, Profile).
+function trackScreen() {
+  const r = S.user ? S.route : 'sign-in';
+  (window.dataLayer = window.dataLayer || []).push({ event: 'virtual_page_view', page_path: `/${r}`, page_title: `Build My Bicep · ${r[0].toUpperCase()}${r.slice(1)}` });
+}
+window.addEventListener('hashchange', () => { S.route = routeFromHash(); S.sheet = null; render(); window.scrollTo({ top: 0 }); trackScreen(); });
 
 store.onAuth(async (u) => {
   if (u && sessionExpired(u)) { S.user = u; await enforceExpiry(); return; }
   S.authReady = true; S.user = u;
+  trackScreen();
   S.unsub?.(); S.unsub = null; S.sessions = []; S.loaded = false;
   if (u) {
     S.draft = null;
