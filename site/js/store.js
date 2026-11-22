@@ -19,6 +19,9 @@ function demoStore() {
   const write = (a) => { try { localStorage.setItem(KEY, JSON.stringify(a)); } catch {} };
   let authCb = () => {}, listeners = new Set();
   const emit = () => listeners.forEach((cb) => cb(read()));
+  const PKEY = 'bmb-demo-profile', profListeners = new Set();
+  const readProf = () => { try { return JSON.parse(localStorage.getItem(PKEY) || '{}'); } catch { return {}; } };
+  const writeProf = (p) => { try { localStorage.setItem(PKEY, JSON.stringify(p)); } catch {} };
   return {
     onAuth(cb) {
       authCb = cb;
@@ -36,6 +39,10 @@ function demoStore() {
     async save(s) { const a = read().filter((x) => x.id !== s.id); a.push(clean(s)); write(a); emit(); },
     async remove(id) { write(read().filter((x) => x.id !== id)); emit(); },
     async importMany(list) { const m = new Map(read().map((x) => [x.id, x])); list.forEach((s) => m.set(s.id, clean(s))); write([...m.values()]); emit(); },
+    // Profile: onboarding answers, plan and AI Coach state. Each top-level key is replaced as a whole.
+    watchProfile(cb) { profListeners.add(cb); setTimeout(() => cb(readProf()), 0); return () => profListeners.delete(cb); },
+    async saveProfile(patch) { writeProf({ ...readProf(), ...clean(patch) }); profListeners.forEach((cb) => cb(readProf())); },
+    async idToken() { return 'demo'; },
   };
 }
 
@@ -107,6 +114,23 @@ function firebaseStore() {
     async remove(id) {
       const m = await load();
       await m.fsM.deleteDoc(m.fsM.doc(col(m), id));
+    },
+    watchProfile(cb, onErr) {
+      let unsub = () => {}, stopped = false;
+      load().then((m) => {
+        if (stopped || !current) return;
+        unsub = m.fsM.onSnapshot(m.fsM.doc(m.db, 'users', current.uid), (snap) => cb(snap.data() || {}), onErr);
+      });
+      return () => { stopped = true; unsub(); };
+    },
+    // Each top-level key in patch replaces that field as a whole (mergeFields).
+    async saveProfile(patch) {
+      const m = await load();
+      await m.fsM.setDoc(m.fsM.doc(m.db, 'users', current.uid), clean(patch), { mergeFields: Object.keys(patch) });
+    },
+    async idToken() {
+      const m = await load();
+      return m.auth.currentUser ? m.auth.currentUser.getIdToken() : null;
     },
     async importMany(list) {
       const m = await load();

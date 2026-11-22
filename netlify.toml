@@ -12,3 +12,9 @@
 [build.environment]
   SECRETS_SCAN_OMIT_PATHS = "site/js/firebase-config.js"
   SECRETS_SCAN_SMART_DETECTION_OMIT_VALUES = "AIzaSyBJEGqMMw9IMAq9OySS7kDTvXK91dErFQ8"
+
+# AI Coach lives at /api/coach (netlify/functions/coach.mjs).
+# Its AI key is set in Netlify → Environment variables, never in this repo.
+[functions]
+  directory = "netlify/functions"
+  node_bundler = "esbuild"

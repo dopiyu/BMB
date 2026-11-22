@@ -96,3 +96,32 @@ There's no need to touch `VERSION` in `site/sw.js`: Netlify stamps it with the c
 - Netlify free plan: enough for this.
 - Firebase Spark (free) plan: enough for this. You won't need to add a card.
 - Domain: the yearly renewal at your registrar.
+
+## AI Coach setup
+
+AI Coach runs on our own AI key through a Netlify function at `/api/coach`. The key lives only in Netlify, never in this repo or on anyone's phone.
+
+1. Get an API key from **one** provider:
+   - Anthropic (Claude): console.anthropic.com → API keys
+   - Google (Gemini): aistudio.google.com → Get API key
+   - OpenAI: platform.openai.com → API keys
+2. In Netlify, go to **Project configuration → Environment variables → Add a variable** and add one of `ANTHROPIC_API_KEY`, `GEMINI_API_KEY` or `OPENAI_API_KEY`. Mark it **secret**.
+3. Optional settings:
+   | Variable | What it does | Default |
+   |---|---|---|
+   | `AI_PROVIDER` | `anthropic`, `gemini` or `openai`, if more than one key is set | whichever key is set |
+   | `AI_MODEL` | Model name for that provider | `claude-haiku-5-5`, `gemini-2.5-flash`, `gpt-4.1-mini` |
+   | `AI_USER_DAILY_LIMIT` | Requests per person per day | 10 |
+   | `AI_DAILY_LIMIT` | Requests for the whole app per day | 300 |
+4. Redeploy: Deploys → Trigger deploy → Deploy project.
+
+**What the function does:** checks the person is signed in (it verifies their Firebase sign-in token), counts requests against the daily limits, sends our coaching instructions plus the person's onboarding answers and last 10 workouts to the model, and returns JSON. The app then caps any weight or rep increase to a small, safe step before showing it.
+
+**What's sent to the AI:** first name, onboarding answers, plan, last 10 finished workouts, coach notes. Email and full name are not sent.
+
+**Editing the content:**
+- Onboarding questions: `site/js/onboarding.js` (`QUESTIONS`)
+- How answers become a plan: `buildPlan()` in `site/js/program.js`
+- Preset questions: `PRESET_QUESTIONS` in `site/js/coach.js`
+- Coaching instructions (the logic layer): `SYSTEM_PROMPT` in `netlify/functions/coach.mjs`
+- Safety caps on AI targets: `clampRec()` in `site/js/program.js`

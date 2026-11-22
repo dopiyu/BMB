@@ -1,0 +1,10 @@
+{
+  "name": "buildmybicep",
+  "private": true,
+  "type": "module",
+  "description": "Build My Bicep PWA. The site is static (site/); only the AI Coach function uses these packages.",
+  "dependencies": {
+    "@netlify/blobs": "8.2.0",
+    "jose": "5.10.0"
+  }
+}

@@ -40,6 +40,15 @@ export const LIBRARY = [
   { name: 'Squats', kind: 'bodyweight', area: 'lower', muscles: { quads: 2, glutes: 2, 'lower-back': 1 } },
   { name: 'Hip thrust', kind: 'weight', area: 'lower', step: 10, start: 40, muscles: { glutes: 2, hamstrings: 1 } },
   { name: 'Calf raise', kind: 'weight', area: 'lower', step: 5, start: 30, muscles: { calves: 2 } },
+  { name: 'Dumbbell bench press', kind: 'weight', area: 'upper', step: 2, start: 6, muscles: { chest: 2, shoulders: 1, triceps: 1 } },
+  { name: 'Dumbbell row', kind: 'weight', area: 'upper', step: 2, start: 8, muscles: { 'mid-back': 2, lats: 1, biceps: 1 } },
+  { name: 'Dumbbell shoulder press', kind: 'weight', area: 'upper', step: 1, start: 5, muscles: { shoulders: 2, triceps: 1 } },
+  { name: 'Push-ups', kind: 'bodyweight', area: 'upper', muscles: { chest: 2, triceps: 1, shoulders: 1 } },
+  { name: 'Superman hold', kind: 'time', area: 'upper', muscles: { 'lower-back': 2, 'mid-back': 1, glutes: 1 } },
+  { name: 'Goblet squat', kind: 'weight', area: 'lower', step: 2, start: 8, muscles: { quads: 2, glutes: 1 } },
+  { name: 'Lunges', kind: 'bodyweight', area: 'lower', muscles: { quads: 2, glutes: 2 } },
+  { name: 'Glute bridge', kind: 'bodyweight', area: 'lower', muscles: { glutes: 2, hamstrings: 1 } },
+  { name: 'Wall sit', kind: 'time', area: 'lower', muscles: { quads: 2 } },
   { name: 'Plank', kind: 'time', area: 'core', muscles: { abs: 2, obliques: 1, 'lower-back': 1 } },
   { name: 'Dead bug', kind: 'bodyweight', area: 'core', muscles: { abs: 2, obliques: 1 } },
 ];
@@ -221,4 +230,161 @@ export function coverage(sessions) {
     });
   }));
   return out;
+}
+
+/* ---------- plans ---------- */
+
+export const DEFAULT_PLAN = {
+  source: 'default', split: 'upperlower',
+  workouts: [
+    { id: 'upper', name: 'Upper body', exercises: TEMPLATES.upper },
+    { id: 'lower', name: 'Lower body', exercises: TEMPLATES.lower },
+  ],
+};
+
+// Exercise slots per training place. The first exercise in a slot that the
+// person can safely do is used.
+const POOLS = {
+  gym: {
+    push: ['Chest press', 'Dumbbell bench press', 'Push-ups'],
+    pull: ['Seated cable row', 'Dumbbell row'],
+    vpull: ['Lat pulldown', 'Seated cable row'],
+    shoulder: ['Shoulder press', 'Lateral raise'],
+    knee: ['Angled leg press', 'Goblet squat', 'Leg extension'],
+    knee2: ['Leg extension', 'Angled leg press'],
+    hinge: ['Romanian deadlift', 'Hip thrust', 'Glute bridge'],
+    ham: ['Leg curl', 'Glute bridge'],
+    arms: ['Bicep curls'],
+    arms2: ['Tricep pushdown'],
+    core: ['Plank'],
+    core2: ['Dead bug', 'Plank'],
+    calf: ['Calf raise'],
+  },
+  home: {
+    push: ['Dumbbell bench press', 'Push-ups'],
+    pull: ['Dumbbell row'],
+    vpull: ['Dumbbell row'],
+    shoulder: ['Dumbbell shoulder press', 'Lateral raise'],
+    knee: ['Goblet squat', 'Squats'],
+    knee2: ['Lunges', 'Squats'],
+    hinge: ['Romanian deadlift', 'Glute bridge'],
+    ham: ['Glute bridge'],
+    arms: ['Bicep curls'],
+    arms2: ['Push-ups'],
+    core: ['Plank'],
+    core2: ['Dead bug', 'Plank'],
+    calf: ['Calf raise'],
+  },
+  bodyweight: {
+    push: ['Push-ups'],
+    pull: ['Superman hold'],
+    vpull: ['Superman hold'],
+    shoulder: ['Push-ups'],
+    knee: ['Squats'],
+    knee2: ['Lunges', 'Wall sit'],
+    hinge: ['Glute bridge'],
+    ham: ['Glute bridge'],
+    arms: ['Push-ups'],
+    arms2: ['Dead bug'],
+    core: ['Plank'],
+    core2: ['Dead bug', 'Plank'],
+    calf: ['Wall sit'],
+  },
+};
+
+const AVOID = {
+  knees: ['Squats', 'Lunges', 'Goblet squat', 'Leg extension', 'Wall sit'],
+  'lower-back': ['Romanian deadlift', 'Back extension (45°)', 'Superman hold', 'Squats', 'Goblet squat'],
+  shoulders: ['Shoulder press', 'Dumbbell shoulder press', 'Lateral raise'],
+};
+
+const LAYOUTS = {
+  full: [
+    { id: 'full-a', name: 'Full body A', slots: ['push', 'vpull', 'knee', 'hinge', 'core', 'arms'] },
+    { id: 'full-b', name: 'Full body B', slots: ['shoulder', 'pull', 'knee2', 'ham', 'core2', 'arms2'] },
+  ],
+  upperlower: [
+    { id: 'upper', name: 'Upper body', slots: ['push', 'pull', 'shoulder', 'vpull', 'core', 'arms', 'arms2'] },
+    { id: 'lower', name: 'Lower body', slots: ['hinge', 'knee', 'knee2', 'ham', 'core', 'calf', 'core2'] },
+  ],
+};
+
+// answers: { goal, experience, days, place, length, limits: [] }
+export function buildPlan(a = {}) {
+  const days = Number(a.days) || 3;
+  const split = days >= 4 && a.experience !== 'new' ? 'upperlower' : 'full';
+  const pool = POOLS[a.place] || POOLS.gym;
+  const banned = new Set((a.limits || []).flatMap((l) => AVOID[l] || []));
+  const per = { 30: 4, 45: 5, 60: 6 }[Number(a.length)] || 5;
+  const workouts = LAYOUTS[split].map((w) => {
+    const picked = [];
+    for (const slot of w.slots) {
+      const ex = (pool[slot] || []).find((n) => !banned.has(n) && !picked.includes(n));
+      if (ex) picked.push(ex);
+      if (picked.length >= per) break;
+    }
+    return { id: w.id, name: w.name, exercises: picked };
+  });
+  return { source: 'onboarding', split, days, workouts };
+}
+
+export function workoutMuscles(w) {
+  const m = {};
+  (w.exercises || []).forEach((n) => Object.entries(musclesOf(n)).forEach(([k, v]) => { if (v === 2) m[k] = 1; }));
+  return Object.keys(m).map((k) => MUSCLES[k].name);
+}
+
+// Next workout in rotation, based on the last completed session.
+export function nextWorkoutId(plan, sessions) {
+  const ids = plan.workouts.map((w) => w.id);
+  const done = sessions.filter((s) => s.status !== 'in-progress').sort((a, b) => b.date.localeCompare(a.date));
+  const last = done[0];
+  if (!last) return ids[0];
+  let lastId = last.workoutId;
+  if (!ids.includes(lastId)) {
+    const t = typeOf(last);
+    lastId = ids.includes(t) ? t : (plan.split === 'full' ? ids[(done.length - 1) % ids.length] : null);
+  }
+  const i = ids.indexOf(lastId);
+  return i < 0 ? ids[0] : ids[(i + 1) % ids.length];
+}
+
+/* ---------- safety caps for AI recommendations ---------- */
+const clampN = (v, lo, hi) => Math.min(hi, Math.max(lo, v));
+
+// Keeps AI suggestions to small, safe steps for first-timers.
+export function clampRec(name, rec, sessions, date) {
+  const def = findEx(name);
+  const h = historyOf(name, sessions, date);
+  const kind = def ? def.kind : kindOf(name, h[0]?.ex.sets);
+  const last = h[0]?.ex.sets || [];
+  let sets = (Array.isArray(rec.sets) ? rec.sets : []).slice(0, 5);
+  if (!sets.length) return null;
+  let capped = false;
+  sets = sets.map((s) => {
+    if (kind === 'time') {
+      const best = Math.max(0, ...last.map(secsOf));
+      const max = best ? Math.min(120, best + 10) : 45;
+      let secs = Math.round(Number(s.secs ?? s.reps) || 0);
+      if (secs > max) { secs = max; capped = true; }
+      return { secs: clampN(secs || 20, 5, 120) };
+    }
+    if (kind === 'bodyweight') {
+      const best = Math.max(0, ...last.map((x) => x.reps || 0));
+      const max = best ? Math.min(30, best + 3) : 12;
+      let reps = Math.round(Number(s.reps) || 0);
+      if (reps > max) { reps = max; capped = true; }
+      return { kg: null, reps: clampN(reps || 8, 1, 30) };
+    }
+    const step = def?.step ?? 2.5;
+    const top = Math.max(0, ...last.map((x) => x.kg || 0));
+    const max = top ? Math.max(top + step, Math.round((top * 1.1) / step) * step) : (def?.start ? def.start * 1.5 : 20);
+    let kg = Number(s.kg);
+    if (!Number.isFinite(kg) || kg <= 0) kg = top || def?.start || null;
+    if (kg != null && kg > max) { kg = max; capped = true; }
+    if (kg != null) kg = Math.round(kg / (step >= 1 ? step : 0.5)) * (step >= 1 ? step : 0.5);
+    let reps = Math.round(Number(s.reps) || 10);
+    return { kg, reps: clampN(reps, 1, 20) };
+  });
+  return { kind, sets, note: String(rec.note || '').slice(0, 160), capped };
 }
