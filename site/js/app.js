@@ -411,7 +411,7 @@ function coachView() {
     <button type="button" class="btn primary" data-act="partialToCoach" data-id="${s.id}" ${busy ? 'disabled' : ''}>Update to AI Coach</button>
   </section>`).join('')}
   ${needsOnboarding() ? onboardingBanner() : ''}
-  ${S.coachErr ? `<div class="banner warn" role="alert">${esc(S.coachErr)}</div>` : ''}
+  ${S.coachErr ? `<div class="banner warn" role="alert">${esc(S.coachErr)}${S.coachErrDetail ? `<span class="err-detail">Details: ${esc(S.coachErrDetail)}</span>` : ''}</div>` : ''}
   ${busy && busy !== 'ask' ? `<section class="card thinking" aria-live="polite"><span class="pulse"></span><div><h3>AI Coach is reviewing your training…</h3><p class="muted">This usually takes 5 to 15 seconds.</p></div></section>` : ''}
   ${c.summary ? `<section class="card summary">
     <p class="eyebrow">${ic('ai')} Updated ${c.lastRunAt ? timeAgo(c.lastRunAt) : ''}</p>
@@ -719,7 +719,7 @@ function coachPayload(extra = {}) {
 }
 async function runCoach(mode, extra = {}) {
   if (S.coachBusy) return;
-  S.coachBusy = mode; S.coachErr = ''; render();
+  S.coachBusy = mode; S.coachErr = ''; S.coachErrDetail = ''; render();
   try {
     const { result, usage } = await callCoach(store, mode, coachPayload(extra));
     const c = { ...coach() };
@@ -753,6 +753,7 @@ async function runCoach(mode, extra = {}) {
     if (mode !== 'ask') toast('AI Coach updated your plan');
   } catch (e) {
     S.coachErr = COACH_ERRORS[e.code] || COACH_ERRORS['ai-error'];
+    S.coachErrDetail = e.detail || e.code || '';
     if (e.usage) { const c = { ...coach(), usage: { day: today(), ...e.usage } }; S.profile = { ...S.profile, coach: c }; store.saveProfile({ coach: c }).catch(() => {}); }
   }
   S.coachBusy = null; render();

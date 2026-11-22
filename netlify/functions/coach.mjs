@@ -26,6 +26,15 @@ const json = (status, body) => new Response(JSON.stringify(body), { status, head
 const istDay = () => new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
 
 export default async (req) => {
+  try {
+    return await handle(req);
+  } catch (e) {
+    console.error('coach function crashed', e);
+    return json(500, { error: 'server-error', detail: String(e?.message || e).slice(0, 200) });
+  }
+};
+
+async function handle(req) {
   if (req.method !== 'POST') return json(405, { error: 'method' });
 
   const token = (req.headers.get('authorization') || '').replace(/^Bearer\s+/i, '');
@@ -58,14 +67,17 @@ export default async (req) => {
     text = await provider.call(SYSTEM_PROMPT, userMessage(body));
   } catch (e) {
     console.error('AI call failed', e?.message);
-    return json(502, { error: 'ai-error' });
+    return json(502, { error: 'ai-error', detail: String(e?.message || '').slice(0, 240), provider: provider.name, model: provider.model });
   }
   const result = parseJSON(text);
-  if (!result || !validShape(body.mode, result)) return json(502, { error: 'bad-output' });
+  if (!result || !validShape(body.mode, result)) {
+    console.error('Unreadable AI output', String(text).slice(0, 300));
+    return json(502, { error: 'bad-output', detail: String(text || '(empty reply)').slice(0, 160), provider: provider.name, model: provider.model });
+  }
 
   await Promise.all([counts.setJSON(userKey, userUsed + 1), counts.setJSON(appKey, appUsed + 1)]);
   return json(200, { result, usage: { used: userUsed + 1, limit: USER_LIMIT }, model: provider.model });
-};
+}
 
 /* ---------- the logic layer ---------- */
 export const SYSTEM_PROMPT = `You are "AI Coach" inside Build My Bicep, a workout log for people who are new to the gym.
