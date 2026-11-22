@@ -143,11 +143,11 @@ Reply as JSON with exactly this shape:
   "nudge": "one short line that helps them show up for the next workout",
   "nextWorkout": "the id of the plan workout they should do next",
   "recommendations": [
-    { "exercise": "exact exercise name from that workout", "sets": [ { "kg": number or null, "reps": number or null, "secs": number or null } ], "note": "at most 15 words" }
+    { "exercise": "exact exercise name from that workout", "sets": [ { "kg": number or null, "reps": number or null, "secs": number or null } ], "note": "at most 10 words" }
   ],
   "memory": ["up to 8 short facts worth remembering about this person for future sessions"]
 }
-Give one recommendation for every exercise in the next workout, then one for every other exercise that appears in recentSessions (people can also build their own workout). At most 20 in total. Use "secs" for timed exercises like planks, "kg": null for bodyweight exercises.
+Give one recommendation for every exercise in the next workout, then one for every other exercise that appears in recentSessions (people can also build their own workout). At most 12 in total. Keep every text field short. Use "secs" for timed exercises like planks, "kg": null for bodyweight exercises.
 
 DATA:
 ${JSON.stringify(data)}`;
@@ -170,7 +170,7 @@ function validShape(mode, r) {
 /* ---------- retries ---------- */
 // Busy or rate-limited replies (429, 500, 503, 529) are retried once after a short pause,
 // then once more on AI_FALLBACK_MODEL if it is set. Kept short to fit the function time limit.
-const RETRYABLE = new Set([429, 500, 503, 529]);
+const RETRYABLE = new Set([429, 500, 503, 529, 'cut-off']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 async function callWithRetry(provider, system, user) {
   const models = [provider.model, provider.model, process.env.AI_FALLBACK_MODEL].filter(Boolean);
@@ -206,11 +206,13 @@ const PROVIDERS = {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
       headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model, max_tokens: 1500, system, messages: [{ role: 'user', content: user }] }),
+      body: JSON.stringify({ model, max_tokens: 4000, system, messages: [{ role: 'user', content: user }] }),
     });
     if (!r.ok) throw providerError('anthropic', r.status, await r.text());
     const d = await r.json();
-    return (d.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+    const text = (d.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+    if (d.stop_reason === 'max_tokens' && !parseJSON(text)) throw providerError('anthropic', 'cut-off', 'reply ended early (max_tokens)');
+    return text;
   },
   async gemini(key, model, system, user) {
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
@@ -219,18 +221,22 @@ const PROVIDERS = {
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents: [{ role: 'user', parts: [{ text: user }] }],
-        generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 1500 },
+        // Newer Gemini models count their thinking against maxOutputTokens, so leave plenty of room.
+        generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 8192 },
       }),
     });
     if (!r.ok) throw providerError('gemini', r.status, await r.text());
     const d = await r.json();
-    return d.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+    const c = d.candidates?.[0];
+    const text = c?.content?.parts?.filter((p) => !p.thought).map((p) => p.text || '').join('') || '';
+    if (c?.finishReason && c.finishReason !== 'STOP' && !parseJSON(text)) throw providerError('gemini', 'cut-off', `reply ended early (${c.finishReason})`);
+    return text;
   },
   async openai(key, model, system, user) {
     const r = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
       headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
-      body: JSON.stringify({ model, max_tokens: 1500, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+      body: JSON.stringify({ model, max_tokens: 4000, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
     });
     if (!r.ok) throw providerError('openai', r.status, await r.text());
     const d = await r.json();
