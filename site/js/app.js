@@ -1,9 +1,11 @@
 import { createStore, isDemo } from './store.js';
 import {
-  LIBRARY, TEMPLATES, TYPE_LABEL, MUSCLES, findEx, canon, musclesOf, kindOf, typeOf, nextType,
-  suggestFor, coverage, volumeOf, setCount, setText, fmtKg, secsOf, historyOf,
+  LIBRARY, TYPE_LABEL, MUSCLES, DEFAULT_PLAN, findEx, canon, musclesOf, kindOf, typeOf, classify,
+  coverage, volumeOf, setCount, setText, fmtKg, secsOf, historyOf, buildPlan, workoutMuscles, nextWorkoutId, clampRec,
 } from './program.js';
 import { bodySVG } from './bodymap.js';
+import { QUESTIONS, ONBOARDING_VERSION, answerLabel } from './onboarding.js';
+import { callCoach, COACH_ERRORS, PRESET_QUESTIONS, recSummary } from './coach.js';
 
 /* ---------- helpers ---------- */
 const app = document.getElementById('app');
@@ -42,6 +44,7 @@ const ICON = {
   moon: '<path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/>',
   dl: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 20h14"/>',
   phone: '<rect x="7" y="3" width="10" height="18" rx="2.5"/><path d="M11 18h2"/>',
+  ai: '<path d="M12 3.5 13.9 9l5.6 1.9-5.6 1.9L12 18.5l-1.9-5.7L4.5 10.9 10.1 9z"/><path d="M18.5 3.5v3M17 5h3"/>',
   spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M6 18l2.5-2.5M15.5 8.5 18 6"/>',
 };
 const ic = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICON[n]}</svg>`;
@@ -91,48 +94,76 @@ async function enforceExpiry() {
   return true;
 }
 
+
 /* ---------- state ---------- */
 const store = createStore();
-const ROUTES = ['home', 'history', 'progress', 'profile'];
-const routeFromHash = () => { const h = location.hash.replace('#', ''); return ROUTES.includes(h) ? h : 'home'; };
+const ROUTES = ['home', 'history', 'coach', 'progress', 'profile'];
+const NAV_LABEL = { home: 'Home', history: 'History', coach: 'AI Coach', progress: 'Progress', profile: 'Profile' };
+const routeFromHash = () => { const h = location.hash.replace('#', ''); return ROUTES.includes(h) || h === 'onboarding' ? h : 'home'; };
 
 const S = {
   user: null, authReady: false, authErr: '', authNote: '', signingIn: false, installOpen: false,
   sessions: [], loaded: false, unsub: null,
+  profile: {}, profileLoaded: false, punsub: null,
   route: routeFromHash(),
-  draft: null, saving: false, formErr: '',
+  draft: null, saving: false, formErr: '', exErr: {},
   sheet: null,
   hist: { mode: 'week', anchor: today(), open: new Set(), confirm: null },
   prog: { filter: 'all', view: 'front', sel: null },
+  ob: null,
+  coachBusy: null, coachErr: '', coachOffConfirm: false,
 };
 
-const draftKey = () => `bmb-draft:${S.user?.uid}`;
+const plan = () => (S.profile.plan?.workouts?.length ? S.profile.plan : DEFAULT_PLAN);
+const coach = () => S.profile.coach || {};
+const coachOn = () => !!coach().enabled;
+const recFor = (name) => (coachOn() ? coach().recs?.[canon(name)] || null : null);
+const isPartial = (s) => s.status === 'in-progress';
+const label = (s) => s.workoutName || TYPE_LABEL[typeOf(s)] || 'Workout';
+const needsOnboarding = () => S.profileLoaded && !S.profile.onboarding?.done;
+const forcedOnboarding = () => needsOnboarding() && S.loaded && S.sessions.length === 0;
+const FREESTYLE = { id: 'freestyle', name: 'Freestyle', exercises: [] };
+const workoutById = (id) => (id === 'freestyle' ? FREESTYLE : plan().workouts.find((w) => w.id === id) || null);
+const recommendedId = () => {
+  const p = plan(); const c = coach();
+  if (coachOn() && p.workouts.some((w) => w.id === c.nextWorkout)) return c.nextWorkout;
+  return nextWorkoutId(p, S.sessions);
+};
+
+const draftKey = () => `bmb-draft2:${S.user?.uid}`;
 const saveDraft = () => { try { localStorage.setItem(draftKey(), JSON.stringify(S.draft)); } catch {} };
 const clearDraft = () => { try { localStorage.removeItem(draftKey()); } catch {} };
 
-function newDraft(type, date = today()) {
-  return {
-    date, type, editingId: null, forceEdit: false,
-    exercises: TEMPLATES[type].map((n) => ({ name: n, kind: findEx(n).kind, sets: [{}, {}, {}] })),
-    cardio: [{ type: 'Brisk walk', km: null, min: null }],
-    notes: '',
-  };
+function newDraft(date = today()) {
+  return { date, workoutId: null, workoutName: '', status: 'in-progress', editingId: null, forceEdit: false,
+    exercises: [], cardio: [{ type: 'Brisk walk', km: null, min: null }], notes: '' };
+}
+const blankEx = (name, kind) => ({ name, kind: kind || findEx(name)?.kind || 'weight', sets: [{}, {}, {}], saved: false });
+function pickWorkout(id) {
+  const d = S.draft; const w = workoutById(id); if (!w) return;
+  const saved = d.exercises.filter((e) => e.saved);
+  const have = new Set(saved.map((e) => canon(e.name)));
+  d.workoutId = w.id; d.workoutName = w.name;
+  d.exercises = [...saved, ...w.exercises.filter((n) => !have.has(canon(n))).map((n) => blankEx(n))];
 }
 function draftFromSession(s) {
   return {
-    date: s.date, type: typeOf(s), editingId: s.id, forceEdit: true,
-    exercises: (s.exercises || []).map((e) => ({ name: e.name, kind: kindOf(e.name, e.sets), sets: (e.sets || []).map((x) => ({ ...x })) })),
-    cardio: (s.cardio || []).map((c) => ({ ...c })),
+    date: s.date, workoutId: s.workoutId || (plan().workouts.some((w) => w.id === typeOf(s)) ? typeOf(s) : 'freestyle'),
+    workoutName: label(s), status: isPartial(s) ? 'in-progress' : 'complete', editingId: s.id, forceEdit: true,
+    exercises: (s.exercises || []).map((e) => ({ name: e.name, kind: kindOf(e.name, e.sets), sets: (e.sets || []).map((x) => ({ ...x })), saved: true })),
+    cardio: (s.cardio || []).length ? s.cardio.map((c) => ({ ...c })) : [{ type: 'Brisk walk', km: null, min: null }],
     notes: s.notes || '',
   };
 }
 function loadDraft() {
   let d = null;
   try { d = JSON.parse(localStorage.getItem(draftKey()) || 'null'); } catch {}
-  if (d && (d.editingId || d.date === today() || d.forceEdit) && Array.isArray(d.exercises)) return d;
-  return newDraft(nextType(S.sessions));
+  if (d && Array.isArray(d.exercises) && (d.editingId || d.date === today() || d.forceEdit)) return d;
+  const open = S.sessions.find((s) => s.date === today() && isPartial(s));
+  return open ? draftFromSession(open) : newDraft();
 }
-const touched = (d) => d.forceEdit || d.exercises.some((e) => e.sets.some((s) => s.kg != null || s.reps != null || s.secs != null))
+const hasData = (e) => e.sets.some((s) => s.kg != null || s.reps != null || s.secs != null);
+const touched = (d) => d.forceEdit || !!d.workoutId || d.exercises.some(hasData)
   || d.cardio.some((c) => c.km != null || c.min != null) || (d.notes || '').trim();
 
 const sorted = () => [...S.sessions].sort((a, b) => b.date.localeCompare(a.date));
@@ -141,15 +172,23 @@ const sorted = () => [...S.sessions].sort((a, b) => b.date.localeCompare(a.date)
 function render() {
   if (!S.authReady) { app.innerHTML = `<div class="splash"><div class="mark">${markSVG()}</div></div>`; navEl.hidden = true; return; }
   if (!S.user) { app.innerHTML = loginView(); navEl.hidden = true; sheetEl.innerHTML = ''; return; }
+  if (S.loaded && S.profileLoaded && (forcedOnboarding() || S.route === 'onboarding')) {
+    if (!S.ob) startOnboarding();
+    navEl.hidden = true; sheetEl.innerHTML = ''; sheetEl.hidden = true;
+    app.innerHTML = `<main class="page ob-page" id="page">${themeBtn()}${onboardingView()}</main>`;
+    return;
+  }
   navEl.hidden = false;
   renderNav();
-  const view = { home: homeView, history: historyView, progress: progressView, profile: profileView }[S.route];
+  const view = { home: homeView, history: historyView, coach: coachView, progress: progressView, profile: profileView }[S.route] || homeView;
   app.innerHTML = `<main class="page" id="page">${themeBtn()}${view()}</main>`;
   renderSheet();
 }
 
 function renderNav() {
-  navEl.innerHTML = ROUTES.map((r) => `<a href="#${r}" class="nb${S.route === r ? ' on' : ''}" ${S.route === r ? 'aria-current="page"' : ''}>${ic(r)}<span>${r[0].toUpperCase() + r.slice(1)}</span></a>`).join('');
+  const dot = coachOn() && S.sessions.some((s) => isPartial(s) && s.date < today());
+  navEl.innerHTML = ROUTES.map((r) => `<a href="#${r}" class="nb${r === 'coach' ? ' center' : ''}${S.route === r ? ' on' : ''}" ${S.route === r ? 'aria-current="page"' : ''}>
+    ${r === 'coach' ? `<span class="nb-orb">${ic('ai')}${dot ? '<i class="nb-dot" aria-label="Needs attention"></i>' : ''}</span>` : ic(r)}<span>${NAV_LABEL[r]}</span></a>`).join('');
 }
 
 const markSVG = () => `<svg viewBox="0 0 64 64" aria-hidden="true"><rect x="6" y="24" width="8" height="16" rx="2"/><rect x="14" y="18" width="8" height="28" rx="2"/><rect x="22" y="29" width="20" height="6" rx="2"/><rect x="42" y="18" width="8" height="28" rx="2"/><rect x="50" y="24" width="8" height="16" rx="2"/></svg>`;
@@ -187,6 +226,7 @@ function loginView() {
   </section>`;
 }
 
+
 /* ----- home ----- */
 const LOAD_ERR = {
   'permission-denied': ['Firebase is blocking access to your data.', 'In Firebase, go to Firestore → Rules, paste in the contents of firestore.rules, then Publish.'],
@@ -200,77 +240,108 @@ function errorCard() {
   return `<section class="card err-card" role="alert"><h3>${title}</h3><p class="muted">${fix}</p><p class="fine">Error code: ${esc(S.loadErr)}</p><button type="button" class="btn primary" data-act="retry">Try again</button></section>`;
 }
 
+
+function onboardingBanner() {
+  if (!needsOnboarding()) return '';
+  return `<div class="banner info row-banner"><span><b>Get a plan made for you.</b> Answer 6 quick questions to unlock personalised workouts and AI Coach suggestions.</span><button type="button" class="btn small primary" data-act="go" data-r="onboarding">Start</button></div>`;
+}
+
 function homeView() {
   if (S.loadErr) return errorCard();
-  if (!S.loaded) return `<div class="empty">Loading your sessions…</div>`;
+  if (!S.loaded || !S.profileLoaded) return `<div class="empty">Loading your sessions…</div>`;
   const d = S.draft;
   const first = (S.user.displayName || '').split(' ')[0] || 'there';
-  const savedToday = S.sessions.find((s) => s.date === today());
   const head = `<header class="top"><p class="eyebrow">${fLong(today())}</p><h1 class="h1">Hi, ${esc(first)}</h1></header>`;
+  const doneToday = S.sessions.find((s) => s.date === today() && !isPartial(s));
+  if (doneToday && !d.editingId && !touched(d)) return head + onboardingBanner() + doneView(doneToday);
 
-  if (savedToday && !d.editingId && !touched(d)) return head + doneView(savedToday);
-
-  const sug = nextType(S.sessions.filter((s) => s.id !== d.editingId));
-  const clash = S.sessions.find((s) => s.date === d.date && s.id !== d.editingId);
-  const n = d.editingId ? sorted().reverse().findIndex((s) => s.id === d.editingId) + 1 : S.sessions.length + 1;
-
-  return head + `
-  <section class="hero">
-    <div class="hero-row">
-      <div><p class="eyebrow on-hero">${d.editingId ? 'Editing session' : `Session ${n}`}</p><h2 class="hero-title">${TYPE_LABEL[d.type] || 'Workout'}</h2></div>
-      <label class="date-pill"><span class="sr">Session date</span><input type="date" id="d-date" data-f="date" value="${d.date}" max="${today()}"></label>
+  const clash = S.sessions.find((s) => s.date === d.date && s.id !== d.editingId && !isPartial(s));
+  const w = d.workoutId ? workoutById(d.workoutId) : null;
+  const savedCount = d.exercises.filter((e) => e.saved).length;
+  return head + onboardingBanner() + `
+  <section class="pick">
+    <div class="pick-head">
+      <div><p class="eyebrow">${d.editingId ? 'Editing workout' : 'Today\'s workout'}</p><h2 class="h2">${d.workoutId ? esc(d.workoutName) : 'What are you training today?'}</h2></div>
+      <label class="date-chip"><span class="sr">Workout date</span><input type="date" id="d-date" data-f="date" value="${d.date}" max="${today()}"></label>
     </div>
-    <div class="seg on-hero" role="group" aria-label="Session type">
-      ${['upper', 'lower'].map((t) => `<button type="button" data-act="type" data-t="${t}" class="${d.type === t ? 'on' : ''}" aria-pressed="${d.type === t}">${TYPE_LABEL[t]}${t === sug && !d.editingId ? '<i class="dot" title="Suggested next"></i>' : ''}</button>`).join('')}
-    </div>
-    <button type="button" class="ghost-hero" data-act="fillall">${ic('spark')} Fill all targets</button>
+    ${carousel()}
   </section>
-  ${clash ? `<div class="banner warn">You already logged ${fShort(d.date)}. Saving replaces that session. <button type="button" class="link" data-act="openSaved" data-id="${clash.id}">Open it</button></div>` : ''}
-  <div class="stack">${d.exercises.map((e, i) => exCard(e, i)).join('')}</div>
+  ${clash ? `<div class="banner warn">You already logged ${fShort(d.date)}. Saving replaces that workout. <button type="button" class="link" data-act="openSaved" data-id="${clash.id}">Open it</button></div>` : ''}
+  ${!coachOn() && w ? `<button type="button" class="cta-coach" data-act="go" data-r="coach">${ic('ai')}<span><b>Enable AI Coach</b><small>Get sets, reps and weights picked for you after every workout</small></span>${ic('chev')}</button>` : ''}
+  ${!w ? `<div class="empty small-empty">Pick a workout above to see its exercises.</div>` : `
+  ${coachOn() && d.exercises.some((e) => !e.saved && recFor(e.name)) ? `<button type="button" class="btn small rec-all" data-act="fillall">${ic('ai')} Fill all AI Coach recommendations</button>` : ''}
+  <div class="stack">${d.exercises.map((e, i) => exCard(e, i)).join('') || '<div class="empty small-empty">No exercises yet. Add one below.</div>'}</div>
   <button type="button" class="btn dashed block" data-act="addEx">${ic('plus')} Add exercise</button>
   ${cardioCard()}
   <section class="card"><label class="lbl" for="d-notes">Notes</label><textarea id="d-notes" data-f="notes" rows="2" placeholder="How it felt, machine used, any pain">${esc(d.notes)}</textarea></section>
   ${S.formErr ? `<p class="err" role="alert">${esc(S.formErr)}</p>` : ''}
-  <div class="save-row">
-    <button type="button" class="btn primary grow" data-act="save" ${S.saving ? 'disabled' : ''}>${S.saving ? 'Saving…' : d.editingId ? 'Update session' : 'Save session'}</button>
-    ${d.editingId || touched(d) ? `<button type="button" class="btn" data-act="discard">${d.editingId ? 'Cancel' : 'Reset'}</button>` : ''}
-  </div>`;
+  <div class="finish">
+    <p class="fine">${savedCount ? `${savedCount} of ${d.exercises.length} exercises saved.` : 'Save each exercise as you finish it, or log everything at the end.'}${coachOn() ? ' AI Coach reviews the workout when you finish.' : ''}</p>
+    <div class="save-row">
+      <button type="button" class="btn primary grow" data-act="finish" ${S.saving ? 'disabled' : ''}>${S.saving ? 'Saving…' : d.status === 'complete' && d.editingId ? 'Update workout' : 'Finish workout'}</button>
+      <button type="button" class="btn" data-act="discard">${d.editingId ? 'Cancel' : 'Reset'}</button>
+    </div>
+  </div>`}`;
+}
+
+function carousel() {
+  const d = S.draft; const rec = recommendedId();
+  const cards = [...plan().workouts, FREESTYLE].map((w) => {
+    const on = d.workoutId === w.id;
+    const mus = w.id === 'freestyle' ? 'Log anything you like' : workoutMuscles(w).slice(0, 4).join(' · ');
+    const meta = w.id === 'freestyle' ? 'Your own exercises' : `${w.exercises.length} exercises · about ${Math.max(20, w.exercises.length * 8)} min`;
+    return `<button type="button" class="wcard${on ? ' on' : ''}" data-act="pickW" data-id="${w.id}" aria-pressed="${on}">
+      ${w.id === rec && !d.editingId ? '<span class="badge">Recommended</span>' : '<span class="badge ghost" aria-hidden="true"></span>'}
+      <span class="wname">${esc(w.name)}</span><span class="wmeta">${esc(meta)}</span><span class="wmus">${esc(mus)}</span>
+      ${on ? `<span class="wcheck">${ic('check')}</span>` : ''}</button>`;
+  }).join('');
+  return `<div class="carousel" role="group" aria-label="Choose a workout">${cards}</div>`;
 }
 
 function exCard(e, i) {
-  const sg = suggestFor(e.name, S.sessions.filter((s) => s.id !== S.draft.editingId), S.draft.date);
-  const kind = e.kind || sg.kind;
+  const d = S.draft;
+  const kind = e.kind || kindOf(e.name, e.sets);
+  const name = findEx(e.name)?.name || e.name;
   const mus = Object.entries(musclesOf(e.name)).filter(([, w]) => w === 2).map(([m]) => MUSCLES[m].name);
-  const last = sg.last ? `<p class="last"><span>Last · ${fShort(sg.last.date)}</span> ${sg.last.ex.sets.map((s) => setText(s, kind)).join(' · ')}</p>` : '<p class="last"><span>No history yet</span></p>';
-  const tgt = sg.sets[0];
-  const tgtText = kind === 'time' ? `${tgt.secs}s × 3` : kind === 'bodyweight' ? `${tgt.reps} reps × 3` : `${fmtKg(tgt.kg)} kg × ${tgt.reps} × 3`;
-  const hdr = kind === 'time' ? '<span>Set</span><span>Seconds</span><span></span><span>Target</span><span></span>'
-    : kind === 'bodyweight' ? '<span>Set</span><span>Reps</span><span></span><span>Target</span><span></span>'
-      : '<span>Set</span><span>Kg</span><span>Reps</span><span>Target</span><span></span>';
+  const prev = historyOf(e.name, S.sessions.filter((s) => s.id !== d.editingId && s.date !== d.date), d.date)[0];
+  const last = prev ? `<p class="last"><span>Last · ${fShort(prev.date)}</span> ${prev.ex.sets.map((s) => setText(s, kind)).join(' · ')}</p>` : '<p class="last"><span>No history yet</span></p>';
+  if (e.saved) {
+    return `<article class="card ex saved">
+      <div class="ex-head"><div class="ex-title"><h3>${esc(name)}</h3><p class="mus-tags">${e.sets.map((s) => setText(s, kind)).join(' · ')}</p></div>
+      <span class="pill up">${ic('check')} Saved</span></div>
+      <div class="ex-foot"><button type="button" class="btn small" data-act="editEx" data-i="${i}">Edit</button></div>
+    </article>`;
+  }
+  const rec = recFor(e.name);
+  const hasT = !!rec;
+  const hdr = `<span>Set</span>${kind === 'time' ? '<span>Seconds</span><span></span>' : kind === 'bodyweight' ? '<span>Reps</span><span></span>' : '<span>Kg</span><span>Reps</span>'}${hasT ? '<span>AI target</span>' : ''}<span></span>`;
   const rows = e.sets.map((s, j) => {
-    const t = sg.sets[Math.min(j, sg.sets.length - 1)];
-    const tl = kind === 'time' ? `${t.secs}s` : kind === 'bodyweight' ? `${t.reps}` : `${fmtKg(t.kg)}×${t.reps}`;
-    const used = kind === 'time' ? s.secs === t.secs : kind === 'bodyweight' ? s.reps === t.reps : s.kg === t.kg && s.reps === t.reps;
+    const t = hasT ? rec.sets[Math.min(j, rec.sets.length - 1)] : null;
+    const tl = t ? (kind === 'time' ? `${t.secs}s` : kind === 'bodyweight' ? `${t.reps}` : `${fmtKg(t.kg)}×${t.reps}`) : '';
+    const used = t && (kind === 'time' ? s.secs === t.secs : kind === 'bodyweight' ? s.reps === t.reps : s.kg === t.kg && s.reps === t.reps);
     const inA = kind === 'time'
       ? `<input id="e${i}s${j}secs" type="number" inputmode="numeric" min="0" step="5" aria-label="Set ${j + 1} seconds" data-f="secs" data-i="${i}" data-j="${j}" value="${s.secs ?? ''}">`
       : kind === 'bodyweight' ? `<input id="e${i}s${j}reps" type="number" inputmode="numeric" min="0" aria-label="Set ${j + 1} reps" data-f="reps" data-i="${i}" data-j="${j}" value="${s.reps ?? ''}">`
         : `<input id="e${i}s${j}kg" type="number" inputmode="decimal" min="0" step="0.5" aria-label="Set ${j + 1} weight in kg" data-f="kg" data-i="${i}" data-j="${j}" value="${s.kg ?? ''}">`;
     const inB = kind === 'weight' ? `<input id="e${i}s${j}reps" type="number" inputmode="numeric" min="0" aria-label="Set ${j + 1} reps" data-f="reps" data-i="${i}" data-j="${j}" value="${s.reps ?? ''}">` : '<span></span>';
     return `<span class="setno">${j + 1}</span>${inA}${inB}
-      <button type="button" class="chip${used ? ' used' : ''}" data-act="use" data-i="${i}" data-j="${j}" aria-label="Use target ${tl} for set ${j + 1}">${used ? ic('check') : ''}${tl}</button>
+      ${hasT ? `<button type="button" class="chip${used ? ' used' : ''}" data-act="use" data-i="${i}" data-j="${j}" aria-label="Use AI Coach target ${tl} for set ${j + 1}">${used ? ic('check') : ''}${tl}</button>` : ''}
       <button type="button" class="icon" data-act="rmSet" data-i="${i}" data-j="${j}" aria-label="Remove set ${j + 1}">${ic('x')}</button>`;
   }).join('');
-  return `<article class="card ex${sg.reset ? ' reset' : sg.up ? ' up' : ''}">
+  const recBox = rec ? `<div class="target"><span class="target-lbl">${ic('ai')} AI Coach's Recommendation</span><b>${recSummary(rec.kind || kind, rec.sets)}</b>${rec.note ? `<span>${esc(rec.note)}</span>` : ''}</div>` : '';
+  return `<article class="card ex">
     <div class="ex-head">
-      <div class="ex-title"><h3>${esc(findEx(e.name)?.name || e.name)}</h3>${mus.length ? `<p class="mus-tags">${mus.join(' · ')}</p>` : ''}</div>
-      <button type="button" class="icon" data-act="rmEx" data-i="${i}" aria-label="Remove ${esc(e.name)}">${ic('x')}</button>
+      <div class="ex-title"><h3>${esc(name)}</h3>${mus.length ? `<p class="mus-tags">${mus.join(' · ')}</p>` : ''}</div>
+      <button type="button" class="icon" data-act="rmEx" data-i="${i}" aria-label="Remove ${esc(name)}">${ic('x')}</button>
     </div>
     ${last}
-    <div class="target"><b>Today ${tgtText}</b><span>${esc(sg.note)}</span></div>
-    <div class="sets ${kind}">${hdr}${rows}</div>
+    ${recBox}
+    <div class="sets ${kind}${hasT ? '' : ' nt'}">${hdr}${rows}</div>
+    ${S.exErr[i] ? `<p class="err" role="alert">${esc(S.exErr[i])}</p>` : ''}
     <div class="ex-foot">
-      <button type="button" class="btn small" data-act="addSet" data-i="${i}">${ic('plus')} Add set</button>
-      <button type="button" class="btn small" data-act="useAll" data-i="${i}">${ic('check')} Use all targets</button>
+      <button type="button" class="btn small" data-act="addSet" data-i="${i}">${ic('plus')} Set</button>
+      ${hasT ? `<button type="button" class="btn small" data-act="useAll" data-i="${i}">${ic('check')} Use targets</button>` : ''}
+      <button type="button" class="btn small primary push" data-act="saveEx" data-i="${i}">Save exercise</button>
     </div>
   </article>`;
 }
@@ -290,21 +361,150 @@ function cardioCard() {
   return `<section class="card"><div class="card-head"><h3>Cardio</h3><button type="button" class="btn small" data-act="addCardio">${ic('plus')} Add</button></div>${rows || '<p class="muted">No cardio added.</p>'}</section>`;
 }
 
+
 function doneView(s) {
-  const nt = nextType(S.sessions);
-  const next = TEMPLATES[nt].map((n) => {
-    const sg = suggestFor(n, S.sessions, addDays(today(), 1));
-    const t = sg.sets[0];
-    const tl = sg.kind === 'time' ? `${t.secs}s × 3` : sg.kind === 'bodyweight' ? `${t.reps} reps × 3` : `${fmtKg(t.kg)} kg × ${t.reps} × 3`;
-    return `<li><span>${esc(n)}</span><b>${tl}</b></li>`;
+  const nid = recommendedId(); const nw = workoutById(nid) || plan().workouts[0];
+  const c = coach();
+  const next = nw.exercises.map((n) => {
+    const r = recFor(n);
+    return `<li><span>${esc(n)}</span>${r ? `<b>${recSummary(r.kind, r.sets)}</b>` : ''}</li>`;
   }).join('');
   return `<section class="hero done">
     <p class="eyebrow on-hero">${ic('check')} Logged today</p>
-    <h2 class="hero-title">${TYPE_LABEL[typeOf(s)]}</h2>
+    <h2 class="hero-title">${esc(label(s))}</h2>
     <p class="on-hero-sub">${(s.exercises || []).length} exercises · ${setCount(s)} sets · ${kgFmt(volumeOf(s))} kg moved</p>
-    <div class="row"><button type="button" class="ghost-hero" data-act="openSaved" data-id="${s.id}">Edit today's session</button><button type="button" class="ghost-hero" data-act="otherDate">Log another date</button></div>
+    <div class="row"><button type="button" class="ghost-hero" data-act="openSaved" data-id="${s.id}">Edit today's workout</button><button type="button" class="ghost-hero" data-act="otherDate">Log another date</button></div>
   </section>
-  <section class="card"><div class="card-head"><h3>Next up · ${TYPE_LABEL[nt]}</h3></div><ul class="next-list">${next}</ul></section>`;
+  ${coachOn() && c.summary ? `<button type="button" class="cta-coach" data-act="go" data-r="coach">${ic('ai')}<span><b>${esc(c.summary.headline)}</b><small>Read AI Coach's review</small></span>${ic('chev')}</button>` : ''}
+  <section class="card"><div class="card-head"><h3>Next up · ${esc(nw.name)}</h3>${coachOn() ? '' : '<button type="button" class="link" data-act="go" data-r="coach">Get targets</button>'}</div><ul class="next-list">${next}</ul></section>`;
+}
+
+/* ----- AI Coach ----- */
+function coachView() {
+  const head = `<header class="top"><p class="eyebrow">Your trainer</p><h1 class="h1">AI Coach</h1></header>`;
+  if (!S.loaded || !S.profileLoaded) return head + '<div class="empty">Loading…</div>';
+  if (!coachOn()) {
+    return head + `<section class="hero coach-hero">
+      <span class="orb-big">${ic('ai')}</span>
+      <h2 class="hero-title small">A coach that reads every workout</h2>
+      <ul class="coach-points">
+        <li>${ic('check')} A short, honest review after each workout</li>
+        <li>${ic('check')} How you did compared with last time</li>
+        <li>${ic('check')} Sets, reps and weights for your next session, raised slowly and safely</li>
+        <li>${ic('check')} Quick answers to common questions</li>
+      </ul>
+      <button type="button" class="btn primary block" data-act="enableCoach" ${S.coachBusy ? 'disabled' : ''}>${S.coachBusy ? 'Turning on…' : 'Enable AI Coach'}</button>
+      <p class="fine on-hero-sub">When it's on, your workout log and onboarding answers are sent to our AI provider to create your review. Your name and email aren't sent. You can turn it off any time.</p>
+    </section>
+    ${needsOnboarding() ? onboardingBanner() : ''}`;
+  }
+  const c = coach();
+  const partials = sorted().filter((s) => isPartial(s) && s.date < today());
+  const nid = recommendedId(); const nw = workoutById(nid) || plan().workouts[0];
+  const recRows = nw.exercises.map((n) => { const r = recFor(n); return `<li><span>${esc(n)}</span><b>${r ? recSummary(r.kind, r.sets) : '—'}</b></li>`; }).join('');
+  const usage = c.usage && c.usage.day === today() ? c.usage : null;
+  const busy = S.coachBusy;
+  return head + `
+  ${partials.map((s) => `<section class="card partial">
+    <div class="card-head"><h3>Partial workout detected</h3><span class="pill">${fShort(s.date)}</span></div>
+    <p class="muted">${esc(label(s))}: ${(s.exercises || []).length} exercise${(s.exercises || []).length === 1 ? '' : 's'} saved, workout not finished.</p>
+    <button type="button" class="btn primary" data-act="partialToCoach" data-id="${s.id}" ${busy ? 'disabled' : ''}>Update to AI Coach</button>
+  </section>`).join('')}
+  ${needsOnboarding() ? onboardingBanner() : ''}
+  ${S.coachErr ? `<div class="banner warn" role="alert">${esc(S.coachErr)}</div>` : ''}
+  ${busy && busy !== 'ask' ? `<section class="card thinking" aria-live="polite"><span class="pulse"></span><div><h3>AI Coach is reviewing your training…</h3><p class="muted">This usually takes 5 to 15 seconds.</p></div></section>` : ''}
+  ${c.summary ? `<section class="card summary">
+    <p class="eyebrow">${ic('ai')} Updated ${c.lastRunAt ? timeAgo(c.lastRunAt) : ''}</p>
+    <h2 class="sum-head">${esc(c.summary.headline)}</h2>
+    ${c.summary.recent ? `<div class="sum-block"><b>Latest workout</b><p>${esc(c.summary.recent)}</p></div>` : ''}
+    ${c.summary.comparison ? `<div class="sum-block"><b>Compared with last time</b><p>${esc(c.summary.comparison)}</p></div>` : ''}
+    ${c.summary.next ? `<div class="sum-block"><b>Next session</b><p>${esc(c.summary.next)}</p></div>` : ''}
+    ${c.nudge ? `<p class="nudge">${esc(c.nudge)}</p>` : ''}
+  </section>
+  <section class="card"><div class="card-head"><h3>AI Coach's Recommendation · ${esc(nw.name)}</h3></div><ul class="next-list">${recRows}</ul>
+    <p class="fine">These show on each exercise when you start ${esc(nw.name)}. Increases are capped to small, safe steps.</p></section>`
+    : !busy ? `<section class="card"><h3>No review yet</h3><p class="muted">${S.sessions.length ? 'Run your first review now, or finish a workout and AI Coach will review it.' : 'Finish your first workout and AI Coach will review it.'}</p>
+    <button type="button" class="btn primary" data-act="runCoach">Review my training</button></section>` : ''}
+  <section class="card">
+    <div class="card-head"><h3>Ask your coach</h3></div>
+    <div class="chips-wrap">${PRESET_QUESTIONS.map((q, k) => `<button type="button" class="qchip" data-act="ask" data-k="${k}" ${busy ? 'disabled' : ''}>${esc(q)}</button>`).join('')}</div>
+    ${busy === 'ask' ? '<p class="muted" aria-live="polite">Thinking…</p>' : ''}
+    ${(c.qa || []).slice(0, 5).map((x) => `<div class="qa"><p class="q">${esc(x.q)}</p><p class="a">${esc(x.a)}</p></div>`).join('')}
+  </section>
+  <div class="coach-foot">
+    ${usage ? `<span class="fine">${Math.max(0, usage.limit - usage.used)} of ${usage.limit} AI Coach requests left today</span>` : '<span></span>'}
+    ${c.summary && !busy ? '<button type="button" class="link" data-act="runCoach">Refresh review</button>' : ''}
+  </div>
+  <button type="button" class="link danger-link" data-act="disableCoach">${S.coachOffConfirm ? 'Tap again to turn off AI Coach' : 'Turn off AI Coach'}</button>`;
+}
+
+function timeAgo(iso) {
+  const m = Math.round((Date.now() - Date.parse(iso)) / 60000);
+  if (!Number.isFinite(m)) return '';
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m} min ago`;
+  const h = Math.round(m / 60); if (h < 24) return `${h} h ago`;
+  return fShort(toStr(new Date(Date.parse(iso))));
+}
+
+/* ----- onboarding ----- */
+function startOnboarding() {
+  S.ob = { step: 0, answers: { ...(S.profile.onboarding?.answers || {}) }, enable: !coachOn() };
+}
+function onboardingView() {
+  const ob = S.ob; const n = QUESTIONS.length; const forced = forcedOnboarding();
+  const close = forced ? '' : `<button type="button" class="icon ob-close" data-act="obClose" aria-label="Close">${ic('x')}</button>`;
+  if (ob.step < n) {
+    const q = QUESTIONS[ob.step]; const v = ob.answers[q.id];
+    const sel = (val) => (q.type === 'multi' ? (v || []).includes(val) : v === val);
+    const ok = q.optional || (q.type === 'multi' ? true : v != null);
+    return `<section class="ob">
+      <div class="ob-top">${ob.step ? `<button type="button" class="icon" data-act="obBack" aria-label="Back">${ic('left')}</button>` : '<span></span>'}
+        <div class="ob-bar" role="progressbar" aria-valuemin="1" aria-valuemax="${n}" aria-valuenow="${ob.step + 1}"><i style="width:${((ob.step + 1) / (n + 1)) * 100}%"></i></div>${close}</div>
+      <p class="eyebrow">Question ${ob.step + 1} of ${n}</p>
+      <h1 class="ob-title">${esc(q.title)}</h1>
+      ${q.help ? `<p class="muted">${esc(q.help)}</p>` : ''}
+      <div class="ob-opts" role="${q.type === 'multi' ? 'group' : 'radiogroup'}" aria-label="${esc(q.title)}">
+        ${q.options.map((o) => `<button type="button" class="ob-opt${sel(o.value) ? ' on' : ''}" data-act="obPick" data-q="${q.id}" data-v="${esc(o.value)}" role="${q.type === 'multi' ? 'checkbox' : 'radio'}" aria-checked="${sel(o.value)}">
+          <span class="ob-opt-txt"><b>${esc(o.label)}</b>${o.sub ? `<small>${esc(o.sub)}</small>` : ''}</span><span class="ob-tick">${sel(o.value) ? ic('check') : ''}</span></button>`).join('')}
+      </div>
+      <button type="button" class="btn primary block" data-act="obNext" ${ok ? '' : 'disabled'}>${q.type === 'multi' && !(v || []).length ? 'Nothing, continue' : 'Continue'}</button>
+    </section>`;
+  }
+  const p = buildPlan(ob.answers);
+  return `<section class="ob">
+    <div class="ob-top"><button type="button" class="icon" data-act="obBack" aria-label="Back">${ic('left')}</button><div class="ob-bar"><i style="width:100%"></i></div>${close}</div>
+    <p class="eyebrow">Your plan</p>
+    <h1 class="ob-title">${p.workouts.length} workouts, ${esc(answerLabel(QUESTIONS.find((q) => q.id === 'days'), ob.answers.days)).toLowerCase()} a week</h1>
+    <p class="muted">Rotate through these in order. The app shows which one is next.</p>
+    <div class="stack">${p.workouts.map((w) => `<div class="card ob-plan"><h3>${esc(w.name)}</h3><p class="muted small">${esc(workoutMuscles(w).join(' · '))}</p><ol>${w.exercises.map((x) => `<li>${esc(x)}</li>`).join('')}</ol></div>`).join('')}</div>
+    <div class="card ob-ans">${QUESTIONS.map((q, k) => `<button type="button" class="ob-ans-row" data-act="obGo" data-k="${k}"><span class="muted small">${esc(q.title)}</span><b>${esc(answerLabel(q, ob.answers[q.id]) || 'Not answered')}</b></button>`).join('')}</div>
+    ${coachOn() ? '' : `<label class="ob-coach"><input type="checkbox" id="ob-coach" data-f="obcoach" ${ob.enable ? 'checked' : ''}><span><b>Turn on AI Coach</b><small>Your answers and workout log are sent to our AI provider to set your targets and review each workout. Your name and email aren't sent.</small></span></label>`}
+    <button type="button" class="btn primary block" data-act="obFinish" ${S.saving ? 'disabled' : ''}>${S.saving ? 'Saving…' : 'Start training'}</button>
+  </section>`;
+}
+
+async function finishOnboarding() {
+  const ob = S.ob; const p = buildPlan(ob.answers);
+  const enable = coachOn() || ob.enable;
+  const c = coach();
+  S.saving = true; render();
+  try {
+    await store.saveProfile({
+      onboarding: { done: true, version: ONBOARDING_VERSION, answers: ob.answers, completedAt: new Date().toISOString() },
+      plan: p,
+      ...(enable && !c.enabled ? { coach: { ...c, enabled: true, consentAt: new Date().toISOString() } } : {}),
+    });
+    S.profile = { ...S.profile, onboarding: { done: true, answers: ob.answers }, plan: p, ...(enable ? { coach: { ...c, enabled: true } } : {}) };
+    S.ob = null; S.saving = false;
+    if (!S.draft.editingId && !S.draft.exercises.some((e) => e.saved)) { S.draft = newDraft(S.draft.date); clearDraft(); }
+    location.hash = enable ? 'coach' : 'home'; S.route = enable ? 'coach' : 'home';
+    toast('Your plan is ready');
+    render();
+    if (enable) runCoach(S.sessions.length ? 'analyze' : 'onboard');
+  } catch {
+    S.saving = false; toast('Couldn\'t save your answers. Try again.', 'bad'); render();
+  }
 }
 
 /* ----- history ----- */
@@ -319,6 +519,7 @@ function shift(mode, anchor, dir) {
   if (mode === 'week') return addDays(anchor, 7 * dir);
   const d = parse(anchor); return toStr(new Date(d.getFullYear(), d.getMonth() + dir, 1));
 }
+
 
 function historyView() {
   if (S.loadErr) return errorCard();
@@ -353,7 +554,7 @@ function logItem(s) {
   return `<article class="log${open ? ' open' : ''}">
     <button type="button" class="log-sum" data-act="toggle" data-id="${s.id}" aria-expanded="${open}">
       <span class="log-date"><b>${parse(s.date).getDate()}</b><span>${MON[parse(s.date).getMonth()]}</span></span>
-      <span class="log-main"><span class="pill ${t}">${TYPE_LABEL[t]}</span><span class="log-meta">${(s.exercises || []).length} exercises · ${setCount(s)} sets · ${kgFmt(volumeOf(s))}&nbsp;kg${km ? ` · ${round1(km)}&nbsp;km` : ''}</span></span>
+      <span class="log-main"><span class="row tight"><span class="pill ${t}">${esc(label(s))}</span>${isPartial(s) ? '<span class="pill warn-pill">Partial</span>' : ''}</span><span class="log-meta">${(s.exercises || []).length} exercises · ${setCount(s)} sets · ${kgFmt(volumeOf(s))}&nbsp;kg${km ? ` · ${round1(km)}&nbsp;km` : ''}</span></span>
       ${ic('down', 'chev')}
     </button>
     ${open ? `<div class="log-body">
@@ -368,6 +569,7 @@ function logItem(s) {
     </div>` : ''}
   </article>`;
 }
+
 
 /* ----- progress ----- */
 function progressView() {
@@ -417,7 +619,7 @@ function progressView() {
       <option value="all" ${P.filter === 'all' ? 'selected' : ''}>All sessions (${all.length})</option>
       <option value="7" ${P.filter === '7' ? 'selected' : ''}>Last 7 days</option>
       <option value="30" ${P.filter === '30' ? 'selected' : ''}>Last 30 days</option>
-      <optgroup label="One session">${all.map((s) => `<option value="${s.id}" ${P.filter === s.id ? 'selected' : ''}>${fLong(s.date)} · ${TYPE_LABEL[typeOf(s)]}</option>`).join('')}</optgroup>
+      <optgroup label="One session">${all.map((s) => `<option value="${s.id}" ${P.filter === s.id ? 'selected' : ''}>${fLong(s.date)} · ${esc(label(s))}</option>`).join('')}</optgroup>
     </select>
   </div>
   <section class="card body-card">
@@ -431,11 +633,13 @@ function progressView() {
   ${liftRows ? `<section class="card"><div class="card-head"><h3>Top set, first → latest</h3></div><ul class="lifts">${liftRows}</ul></section>` : ''}`;
 }
 
+
 /* ----- profile ----- */
 function profileView() {
   const u = S.user;
   const initials = (u.displayName || u.email || '?').split(/\s+/).map((x) => x[0]).slice(0, 2).join('').toUpperCase();
   const first = sorted()[S.sessions.length - 1];
+  const p = plan();
   return `<header class="top"><p class="eyebrow">Account</p><h1 class="h1">Profile</h1></header>
   <section class="card profile">
     ${u.photoURL ? `<img class="avatar" src="${esc(u.photoURL)}" alt="" referrerpolicy="no-referrer">` : `<span class="avatar">${esc(initials)}</span>`}
@@ -445,10 +649,15 @@ function profileView() {
     </dl>
   </section>
   <section class="card">
+    <div class="card-head"><h3>Training plan</h3><span class="muted small">${p.source === 'onboarding' ? 'Made from your answers' : 'Starter plan'}</span></div>
+    <ul class="next-list">${p.workouts.map((w) => `<li><span>${esc(w.name)}</span><b>${w.exercises.length} exercises</b></li>`).join('')}</ul>
+    <button type="button" class="btn small" data-act="go" data-r="onboarding">${needsOnboarding() ? 'Complete onboarding' : 'Update my answers'}</button>
+  </section>
+  <section class="card">
     <div class="card-head"><h3>Your data</h3><span class="muted small">${S.sessions.length} sessions${first ? ` since ${fShort(first.date)}` : ''}</span></div>
-    <p class="muted">Copy your log and paste it into a chat with Claude for a full review.</p>
+    <p class="muted">Copy your log to paste into any AI chat, or keep a backup file.</p>
     <div class="row wrap">
-      <button type="button" class="btn small" data-act="copy">Copy log for Claude</button>
+      <button type="button" class="btn small" data-act="copy">Copy my log</button>
       <button type="button" class="btn small" data-act="export">Download backup</button>
       <label class="btn small file">Import backup<input type="file" id="imp" accept="application/json,.json" data-f="import"></label>
     </div>
@@ -484,47 +693,149 @@ function renderSheet() {
   </div>`;
 }
 
-/* ---------- actions ---------- */
+
+/* ---------- coach ---------- */
+const compact = (s) => ({
+  date: s.date, workout: label(s), status: isPartial(s) ? 'partial' : 'complete',
+  exercises: (s.exercises || []).map((e) => ({ name: findEx(e.name)?.name || e.name, sets: (e.sets || []).map((x) => (x.secs != null ? { secs: x.secs } : { kg: x.kg ?? null, reps: x.reps })) })),
+  cardio: (s.cardio || []).map((c) => ({ type: c.type, km: c.km, min: c.min })),
+  notes: s.notes || '',
+});
+function coachPayload(extra = {}) {
+  const p = plan(); const c = coach();
+  const ans = S.profile.onboarding?.answers;
+  return {
+    today: today(),
+    firstName: (S.user.displayName || '').split(' ')[0] || '',
+    onboarding: ans ? Object.fromEntries(QUESTIONS.map((q) => [q.id, answerLabel(q, ans[q.id])])) : null,
+    plan: { split: p.split, workouts: p.workouts.map((w) => ({ id: w.id, name: w.name, exercises: w.exercises })) },
+    sessions: sorted().filter((s) => !isPartial(s)).slice(0, 10).map(compact),
+    memory: c.memory || [],
+    previousSummary: c.summary || null,
+    nextWorkoutHint: nextWorkoutId(p, S.sessions),
+    sessionsFull: S.sessions,
+    ...extra,
+  };
+}
+async function runCoach(mode, extra = {}) {
+  if (S.coachBusy) return;
+  S.coachBusy = mode; S.coachErr = ''; render();
+  try {
+    const { result, usage } = await callCoach(store, mode, coachPayload(extra));
+    const c = { ...coach() };
+    if (mode === 'ask') {
+      c.qa = [{ q: extra.question, a: String(result.answer).slice(0, 1200), at: new Date().toISOString() }, ...(c.qa || [])].slice(0, 10);
+    } else {
+      const p = plan();
+      const allowed = new Set(p.workouts.flatMap((w) => w.exercises).map(canon));
+      const recs = {};
+      (result.recommendations || []).forEach((r) => {
+        const k = canon(r && r.exercise); if (!k || !allowed.has(k)) return;
+        const cr = clampRec(r.exercise, r, S.sessions, addDays(today(), 1)); if (cr) recs[k] = cr;
+      });
+      const str = (v, n) => String(v || '').slice(0, n);
+      const sm = result.summary || {};
+      c.summary = { headline: str(sm.headline, 120), recent: str(sm.recent, 600), comparison: str(sm.comparison, 400), next: str(sm.next, 400) };
+      c.nudge = str(result.nudge, 200);
+      c.nextWorkout = p.workouts.some((w) => w.id === result.nextWorkout) ? result.nextWorkout : nextWorkoutId(p, S.sessions);
+      c.recs = recs;
+      const mem = (result.memory || []).filter((x) => typeof x === 'string' && x.trim()).map((x) => x.slice(0, 200)).slice(0, 12);
+      if (mem.length) c.memory = mem;
+      c.lastRunAt = new Date().toISOString(); c.lastRunFor = extra.justFinished || null;
+    }
+    if (usage) c.usage = { day: today(), used: usage.used, limit: usage.limit };
+    await store.saveProfile({ coach: c });
+    S.profile = { ...S.profile, coach: c };
+    if (extra.justFinished) {
+      const s = S.sessions.find((x) => x.id === extra.justFinished);
+      if (s && !s.coached) store.save({ ...s, coached: true }).catch(() => {});
+    }
+    if (mode !== 'ask') toast('AI Coach updated your plan');
+  } catch (e) {
+    S.coachErr = COACH_ERRORS[e.code] || COACH_ERRORS['ai-error'];
+    if (e.usage) { const c = { ...coach(), usage: { day: today(), ...e.usage } }; S.profile = { ...S.profile, coach: c }; store.saveProfile({ coach: c }).catch(() => {}); }
+  }
+  S.coachBusy = null; render();
+}
+
+/* ---------- workout saving ---------- */
 function fillSet(i, j) {
-  const e = S.draft.exercises[i];
-  const sg = suggestFor(e.name, S.sessions.filter((s) => s.id !== S.draft.editingId), S.draft.date);
-  const t = sg.sets[Math.min(j, sg.sets.length - 1)];
-  const kind = e.kind || sg.kind;
+  const e = S.draft.exercises[i]; const r = recFor(e.name); if (!r) return;
+  const t = r.sets[Math.min(j, r.sets.length - 1)];
+  const kind = e.kind || r.kind;
   if (kind === 'time') e.sets[j] = { secs: t.secs };
   else if (kind === 'bodyweight') e.sets[j] = { kg: null, reps: t.reps };
   else e.sets[j] = { kg: t.kg, reps: t.reps };
 }
+function cleanSets(e) {
+  const kind = e.kind || kindOf(e.name);
+  return e.sets.filter((s) => (kind === 'time' ? s.secs > 0 : s.reps > 0))
+    .map((s) => (kind === 'time' ? { secs: Math.round(s.secs) } : kind === 'bodyweight' ? { kg: null, reps: Math.round(s.reps) } : { kg: s.kg ?? null, reps: Math.round(s.reps) }));
+}
+const halfSet = (e) => (e.kind || 'weight') === 'weight' && e.sets.some((s) => s.kg != null && !(s.reps > 0));
 
-async function save() {
+async function persist(status) {
+  const d = S.draft;
+  const exercises = d.exercises.filter((e) => e.saved || status === 'complete')
+    .map((e) => ({ name: findEx(e.name)?.name || e.name.trim(), kind: e.kind || kindOf(e.name), sets: cleanSets(e) })).filter((e) => e.sets.length);
+  const cardio = d.cardio.filter((c) => c.km != null || c.min != null).map((c) => ({ type: (c.type || 'Cardio').trim() || 'Cardio', km: c.km ?? null, min: c.min ?? null }));
+  const existing = S.sessions.find((s) => s.id === d.date);
+  const session = {
+    id: d.date, date: d.date, workoutId: d.workoutId, workoutName: d.workoutName,
+    type: classify({ exercises }), status, exercises, cardio, notes: (d.notes || '').trim(),
+    coached: status === 'complete' ? !!(existing && existing.coached && existing.status !== 'in-progress' && d.editingId) : false,
+    updatedAt: new Date().toISOString(),
+  };
+  if (d.editingId && d.editingId !== session.id) await store.remove(d.editingId);
+  await store.save(session);
+  d.editingId = session.id;
+  return session;
+}
+
+async function saveExercise(i) {
+  const d = S.draft; const e = d.exercises[i];
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date) || d.date > today()) { S.exErr[i] = 'Pick a valid date first.'; return render(); }
+  if (halfSet(e)) { S.exErr[i] = 'Add reps for every set that has a weight, or clear the weight.'; return render(); }
+  const sets = cleanSets(e);
+  if (!sets.length) { S.exErr[i] = 'Fill in at least one set before saving.'; return render(); }
+  delete S.exErr[i];
+  e.sets = sets.map((x) => ({ ...x })); e.saved = true;
+  try {
+    await persist(d.status === 'complete' && d.editingId ? 'complete' : 'in-progress');
+    toast(`${findEx(e.name)?.name || e.name} saved`);
+  } catch { e.saved = false; S.exErr[i] = 'Couldn\'t save. Check your connection and try again.'; }
+  saveDraft(); render();
+}
+
+async function finishWorkout() {
   const d = S.draft;
   S.formErr = '';
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date)) { S.formErr = 'Pick a date for this session.'; return render(); }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(d.date)) { S.formErr = 'Pick a date for this workout.'; return render(); }
   if (d.date > today()) { S.formErr = 'The date can\'t be in the future.'; return render(); }
-  const exercises = d.exercises.map((e) => {
-    const kind = e.kind || kindOf(e.name);
-    const sets = e.sets.filter((s) => (kind === 'time' ? s.secs > 0 : s.reps > 0))
-      .map((s) => (kind === 'time' ? { secs: Math.round(s.secs) } : kind === 'bodyweight' ? { kg: null, reps: Math.round(s.reps) } : { kg: s.kg ?? null, reps: Math.round(s.reps) }));
-    return { name: findEx(e.name)?.name || e.name.trim(), kind, sets };
-  }).filter((e) => e.sets.length);
-  const half = d.exercises.find((e) => (e.kind || 'weight') === 'weight' && e.sets.some((s) => s.kg != null && !(s.reps > 0)));
+  const half = d.exercises.find((e) => !e.saved && halfSet(e));
   if (half) { S.formErr = `${half.name}: add reps for every set that has a weight, or clear the weight.`; return render(); }
-  const cardio = d.cardio.filter((c) => c.km != null || c.min != null).map((c) => ({ type: (c.type || 'Cardio').trim() || 'Cardio', km: c.km ?? null, min: c.min ?? null }));
-  if (!exercises.length && !cardio.length) { S.formErr = 'Fill in at least one set, or add some cardio, before saving.'; return render(); }
-  const session = { id: d.date, date: d.date, type: d.type, exercises, cardio, notes: (d.notes || '').trim(), updatedAt: new Date().toISOString() };
+  const anyEx = d.exercises.some((e) => e.saved || cleanSets(e).length);
+  const anyCardio = d.cardio.some((c) => c.km != null || c.min != null);
+  if (!anyEx && !anyCardio) { S.formErr = 'Fill in at least one set, or add some cardio, before finishing.'; return render(); }
+  const wasEditingComplete = d.status === 'complete' && d.editingId;
   S.saving = true; render();
   try {
-    if (d.editingId && d.editingId !== session.id) await store.remove(d.editingId);
-    await store.save(session);
+    const session = await persist('complete');
     clearDraft();
-    S.draft = newDraft(nextType([...S.sessions.filter((s) => s.id !== session.id && s.id !== d.editingId), session]));
-    toast(`Saved · ${exercises.length} exercises, ${exercises.reduce((t, e) => t + e.sets.length, 0)} sets`);
+    S.draft = newDraft();
+    const latest = sorted().filter((s) => !isPartial(s) || s.id === session.id)[0];
+    const review = coachOn() && (!latest || latest.date <= session.date);
+    toast(wasEditingComplete ? 'Workout updated' : `Workout saved · ${session.exercises.length} exercises`);
+    S.saving = false;
     window.scrollTo({ top: 0 });
-  } catch (e) {
+    if (review) { location.hash = 'coach'; S.route = 'coach'; render(); runCoach('analyze', { justFinished: session.id }); return; }
+  } catch {
     S.formErr = 'Couldn\'t save. Check your connection and try again. Your entries are kept on this phone.';
   }
   S.saving = false; render();
 }
 
+/* ---------- events ---------- */
 app.addEventListener('click', async (ev) => {
   const b = ev.target.closest('[data-act]'); if (!b) return;
   const act = b.dataset.act, i = +b.dataset.i, j = +b.dataset.j, d = S.draft;
@@ -538,25 +849,60 @@ app.addEventListener('click', async (ev) => {
       S.authErr = ''; S.authNote = ''; S.signingIn = true; render();
       try { await store.signIn(); } catch (e) { S.authErr = e?.code === 'auth/unauthorized-domain' ? 'This domain isn\'t allowed in Firebase yet. Add it under Authentication → Settings → Authorized domains.' : 'Sign-in didn\'t finish. Try again.'; }
       S.signingIn = false; render(); return;
-    case 'type':
-      if (d.type === b.dataset.t) return;
-      S.draft = { ...newDraft(b.dataset.t, d.date), editingId: d.editingId, forceEdit: d.forceEdit, notes: d.notes, cardio: d.cardio };
-      break;
-    case 'fillall': d.exercises.forEach((e, x) => e.sets.forEach((_, y) => fillSet(x, y))); toast('Targets filled. Change any set you did differently.'); break;
+    // onboarding
+    case 'obPick': {
+      const q = QUESTIONS.find((x) => x.id === b.dataset.q); const v = b.dataset.v;
+      if (q.type === 'multi') { const a = new Set(S.ob.answers[q.id] || []); a.has(v) ? a.delete(v) : a.add(v); S.ob.answers[q.id] = [...a]; }
+      else S.ob.answers[q.id] = v;
+      render(); return;
+    }
+    case 'obNext': S.ob.step = Math.min(QUESTIONS.length, S.ob.step + 1); render(); window.scrollTo({ top: 0 }); return;
+    case 'obBack': S.ob.step = Math.max(0, S.ob.step - 1); render(); return;
+    case 'obGo': S.ob.step = +b.dataset.k; render(); return;
+    case 'obClose': S.ob = null; location.hash = 'home'; return;
+    case 'obFinish': await finishOnboarding(); return;
+    // home
+    case 'pickW': if (d.workoutId === b.dataset.id) return; pickWorkout(b.dataset.id); S.exErr = {}; break;
+    case 'fillall': d.exercises.forEach((e, x) => { if (!e.saved && recFor(e.name)) e.sets.forEach((_, y) => fillSet(x, y)); }); toast('Targets filled. Change any set you did differently.'); break;
     case 'use': fillSet(i, j); break;
     case 'useAll': d.exercises[i].sets.forEach((_, y) => fillSet(i, y)); break;
     case 'addSet': { const s = d.exercises[i].sets; s.push({ ...(s[s.length - 1] || {}) }); break; }
-    case 'rmSet': d.exercises[i].sets.splice(j, 1); if (!d.exercises[i].sets.length) d.exercises.splice(i, 1); break;
-    case 'rmEx': d.exercises.splice(i, 1); break;
+    case 'rmSet': d.exercises[i].sets.splice(j, 1); if (!d.exercises[i].sets.length) d.exercises[i].sets.push({}); break;
+    case 'rmEx': d.exercises.splice(i, 1); S.exErr = {}; break;
+    case 'saveEx': await saveExercise(i); return;
+    case 'editEx': d.exercises[i].saved = false; if (d.exercises[i].sets.length < 1) d.exercises[i].sets.push({}); break;
     case 'addEx': S.sheet = { q: '' }; saveDraft(); render(); setTimeout(() => document.getElementById('sheet-q')?.focus(), 50); return;
     case 'addCardio': d.cardio.push({ type: 'Brisk walk', km: null, min: null }); break;
     case 'rmCardio': d.cardio.splice(i, 1); break;
-    case 'openSaved': { const s = S.sessions.find((x) => x.id === b.dataset.id); if (s) { S.draft = draftFromSession(s); S.formErr = ''; location.hash = 'home'; S.route = 'home'; window.scrollTo({ top: 0 }); } break; }
-    case 'otherDate': S.draft = { ...newDraft(nextType(S.sessions), addDays(today(), -1)), forceEdit: true }; break;
-    case 'discard': clearDraft(); S.draft = newDraft(nextType(S.sessions)); S.formErr = ''; window.scrollTo({ top: 0 }); render(); return;
-    case 'save': await save(); return;
+    case 'openSaved': { const s = S.sessions.find((x) => x.id === b.dataset.id); if (s) { S.draft = draftFromSession(s); S.formErr = ''; S.exErr = {}; location.hash = 'home'; S.route = 'home'; window.scrollTo({ top: 0 }); } break; }
+    case 'otherDate': S.draft = { ...newDraft(addDays(today(), -1)), forceEdit: true }; break;
+    case 'discard': clearDraft(); S.draft = newDraft(); S.formErr = ''; S.exErr = {}; window.scrollTo({ top: 0 }); render(); return;
+    case 'finish': await finishWorkout(); return;
     case 'go': location.hash = b.dataset.r; return;
     case 'retry': S.unsub?.(); S.loaded = false; S.loadErr = null; render(); subscribe(); return;
+    // coach
+    case 'enableCoach': {
+      const c = { ...coach(), enabled: true, consentAt: new Date().toISOString() };
+      try { await store.saveProfile({ coach: c }); S.profile = { ...S.profile, coach: c }; } catch { toast('Couldn\'t turn on AI Coach. Try again.', 'bad'); return; }
+      render();
+      if (S.sessions.some((s) => !isPartial(s)) || S.profile.onboarding?.done) runCoach(S.sessions.some((s) => !isPartial(s)) ? 'analyze' : 'onboard');
+      return;
+    }
+    case 'disableCoach': {
+      if (!S.coachOffConfirm) { S.coachOffConfirm = true; render(); return; }
+      S.coachOffConfirm = false;
+      const c = { ...coach(), enabled: false };
+      try { await store.saveProfile({ coach: c }); S.profile = { ...S.profile, coach: c }; toast('AI Coach turned off'); } catch { toast('Couldn\'t turn off. Try again.', 'bad'); }
+      render(); return;
+    }
+    case 'runCoach': runCoach(S.sessions.some((s) => !isPartial(s)) ? 'analyze' : 'onboard'); return;
+    case 'ask': runCoach('ask', { question: PRESET_QUESTIONS[+b.dataset.k] }); return;
+    case 'partialToCoach': {
+      const s = S.sessions.find((x) => x.id === b.dataset.id); if (!s) return;
+      try { await store.save({ ...s, status: 'complete', updatedAt: new Date().toISOString() }); } catch { toast('Couldn\'t update. Try again.', 'bad'); return; }
+      runCoach('analyze', { justFinished: s.id }); return;
+    }
+    // history & progress
     case 'hmode': S.hist.mode = b.dataset.m; S.hist.confirm = null; break;
     case 'hprev': S.hist.anchor = shift(S.hist.mode, S.hist.anchor, -1); break;
     case 'hnext': S.hist.anchor = shift(S.hist.mode, S.hist.anchor, 1); break;
@@ -572,7 +918,7 @@ app.addEventListener('click', async (ev) => {
     case 'msel': S.prog.sel = S.prog.sel === b.dataset.m ? null : b.dataset.m; break;
     case 'copy': {
       const text = exportText();
-      try { await navigator.clipboard.writeText(text); toast('Copied. Paste it into Claude.'); } catch { toast('Couldn\'t copy. Use Download backup instead.', 'bad'); }
+      try { await navigator.clipboard.writeText(text); toast('Copied. Paste it into any AI chat.'); } catch { toast('Couldn\'t copy. Use Download backup instead.', 'bad'); }
       return;
     }
     case 'export': {
@@ -580,7 +926,7 @@ app.addEventListener('click', async (ev) => {
       const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = `buildmybicep-${today()}.json`; a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000); return;
     }
-    case 'signout': S.unsub?.(); clearDraft(); await store.signOut(); return;
+    case 'signout': S.unsub?.(); S.punsub?.(); clearDraft(); await store.signOut(); return;
     default: return;
   }
   saveDraft(); render();
@@ -598,7 +944,8 @@ sheetEl.addEventListener('click', (ev) => {
   if (act === 'pick' || act === 'custom') {
     const name = act === 'pick' ? b.dataset.n : S.sheet.q.trim();
     const kind = act === 'pick' ? findEx(name).kind : b.dataset.k;
-    S.draft.exercises.push({ name, kind, sets: [{}, {}, {}] });
+    S.draft.exercises.push(blankEx(name, kind));
+    if (!S.draft.workoutId) { S.draft.workoutId = 'freestyle'; S.draft.workoutName = 'Freestyle'; }
     S.sheet = null; saveDraft(); render();
     const cards = document.querySelectorAll('.ex'); cards[cards.length - 1]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     toast(`${name} added`);
@@ -629,7 +976,13 @@ app.addEventListener('input', (ev) => {
 
 app.addEventListener('change', async (ev) => {
   const t = ev.target, f = t.dataset.f; if (!f) return;
-  if (f === 'date' && t.value) { S.draft.date = t.value; S.draft.forceEdit = true; saveDraft(); render(); }
+  if (f === 'date' && t.value) {
+    const open = S.sessions.find((s) => s.date === t.value && s.id !== S.draft.editingId);
+    if (open && isPartial(open)) S.draft = draftFromSession(open);
+    else { S.draft.date = t.value; S.draft.forceEdit = true; }
+    saveDraft(); render();
+  }
+  else if (f === 'obcoach') { S.ob.enable = t.checked; }
   else if (f === 'hpick' && t.value) { S.hist.anchor = S.hist.mode === 'month' ? `${t.value}-01` : t.value; render(); }
   else if (f === 'pfilter') { S.prog.filter = t.value; S.prog.sel = null; render(); }
   else if (f === 'import' && t.files?.[0]) {
@@ -650,27 +1003,33 @@ function exportText() {
   const lines = sorted().reverse().map((s) => {
     const ex = (s.exercises || []).map((e) => `- ${findEx(e.name)?.name || e.name}: ${(e.sets || []).map((x) => setText(x, kindOf(e.name, e.sets))).join(', ')}`).join('\n');
     const c = (s.cardio || []).map((x) => `- ${x.type}: ${x.km ?? '?'} km in ${x.min ?? '?'} min`).join('\n');
-    return `${s.date} (${TYPE_LABEL[typeOf(s)]})\n${ex}${c ? `\n${c}` : ''}${s.notes ? `\nNotes: ${s.notes}` : ''}`;
+    return `${s.date} (${label(s)})\n${ex}${c ? `\n${c}` : ''}${s.notes ? `\nNotes: ${s.notes}` : ''}`;
   });
   return `My Build My Bicep workout log (${S.sessions.length} sessions):\n\n${lines.join('\n\n')}`;
 }
+
 
 /* ---------- boot ---------- */
 applyTheme();
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') enforceExpiry(); });
 setInterval(enforceExpiry, 60 * 60 * 1000);
-// Tell Google Tag Manager about screen changes (Home, History, Progress, Profile).
+// Tell Google Tag Manager about screen changes.
 function trackScreen() {
   const r = S.user ? S.route : 'sign-in';
   (window.dataLayer = window.dataLayer || []).push({ event: 'virtual_page_view', page_path: `/${r}`, page_title: `Build My Bicep · ${r[0].toUpperCase()}${r.slice(1)}` });
 }
-window.addEventListener('hashchange', () => { S.route = routeFromHash(); S.sheet = null; render(); window.scrollTo({ top: 0 }); trackScreen(); });
+window.addEventListener('hashchange', () => {
+  S.route = routeFromHash(); S.sheet = null; S.coachOffConfirm = false;
+  if (S.route === 'onboarding') startOnboarding(); else if (!forcedOnboarding()) S.ob = null;
+  render(); window.scrollTo({ top: 0 }); trackScreen();
+});
 
 store.onAuth(async (u) => {
   if (u && sessionExpired(u)) { S.user = u; await enforceExpiry(); return; }
   S.authReady = true; S.user = u;
   trackScreen();
-  S.unsub?.(); S.unsub = null; S.sessions = []; S.loaded = false;
+  S.unsub?.(); S.unsub = null; S.punsub?.(); S.punsub = null;
+  S.sessions = []; S.loaded = false; S.profile = {}; S.profileLoaded = false; S.ob = null;
   if (u) {
     S.draft = null;
     subscribe();
@@ -679,19 +1038,27 @@ store.onAuth(async (u) => {
 });
 
 function subscribe() {
+  S.loadErr = null;
+  S.unsub = store.watchSessions((list) => {
     S.loadErr = null;
-    S.unsub = store.watchSessions((list) => {
-      S.loadErr = null;
-      S.sessions = list.filter((s) => s && s.date);
-      const first = !S.loaded; S.loaded = true;
-      if (first || !S.draft) S.draft = loadDraft();
-      const typing = S.route === 'home' && document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && app.contains(document.activeElement);
-      if (!typing || first) render();
-    }, (err) => {
-      S.loaded = true; S.loadErr = (err && err.code) || 'unknown';
-      if (!S.draft) S.draft = loadDraft();
-      render();
-    });
+    S.sessions = list.filter((s) => s && s.date);
+    const first = !S.loaded; S.loaded = true;
+    if (first || !S.draft) S.draft = loadDraft();
+    rerenderUnlessTyping(first);
+  }, (err) => {
+    S.loaded = true; S.loadErr = (err && err.code) || 'unknown';
+    if (!S.draft) S.draft = newDraft();
+    render();
+  });
+  S.punsub = store.watchProfile((p) => {
+    const first = !S.profileLoaded;
+    S.profile = p || {}; S.profileLoaded = true;
+    rerenderUnlessTyping(first);
+  }, () => { S.profileLoaded = true; render(); });
+}
+function rerenderUnlessTyping(force) {
+  const typing = document.activeElement && /INPUT|TEXTAREA|SELECT/.test(document.activeElement.tagName) && app.contains(document.activeElement);
+  if (!typing || force) render();
 }
 render();
 
