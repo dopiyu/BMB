@@ -109,7 +109,7 @@ AI Coach runs on our own AI key through a Netlify function at `/api/coach`. The 
 3. Optional settings:
    | Variable | What it does | Default |
    |---|---|---|
-   | `AI_PROVIDER` | `anthropic`, `gemini` or `openai`, if more than one key is set | whichever key is set |
+   | `AI_PROVIDER` | `anthropic`, `gemini` or `openai`. Set it if more than one key exists (Netlify's AI Gateway can add Anthropic and OpenAI keys on its own) | Gemini, then Anthropic, then OpenAI |
    | `AI_MODEL` | Model name for that provider | `claude-haiku-5-5`, `gemini-2.5-flash`, `gpt-4.1-mini` |
    | `AI_USER_DAILY_LIMIT` | Requests per person per day | 10 |
    | `AI_DAILY_LIMIT` | Requests for the whole app per day | 300 |

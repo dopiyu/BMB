@@ -6,7 +6,7 @@
 //
 // Environment variables (Netlify → Project configuration → Environment variables):
 //   ANTHROPIC_API_KEY or GEMINI_API_KEY or OPENAI_API_KEY   (one is enough)
-//   AI_PROVIDER         optional: anthropic | gemini | openai (defaults to whichever key is set)
+//   AI_PROVIDER         optional: anthropic | gemini | openai (otherwise Gemini, then Anthropic, then OpenAI)
 //   AI_MODEL            optional: overrides the default model for that provider
 //   AI_USER_DAILY_LIMIT optional: requests per person per day (default 10)
 //   AI_DAILY_LIMIT      optional: requests for the whole app per day (default 300)
@@ -168,7 +168,10 @@ function validShape(mode, r) {
 function pickProvider() {
   const want = (process.env.AI_PROVIDER || '').toLowerCase();
   const has = { anthropic: process.env.ANTHROPIC_API_KEY, gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY };
-  const name = want && has[want] ? want : Object.keys(has).find((k) => has[k]);
+  // Gemini first: Netlify's AI Gateway can inject ANTHROPIC_API_KEY / OPENAI_API_KEY
+  // that only work through its own gateway URL, not the providers' public APIs.
+  const order = ['gemini', 'anthropic', 'openai'];
+  const name = want && has[want] ? want : order.find((k) => has[k]);
   if (!name) return null;
   const model = process.env.AI_MODEL || { anthropic: 'claude-haiku-5-5', gemini: 'gemini-2.5-flash', openai: 'gpt-4.1-mini' }[name];
   return { name, model, call: (system, user) => PROVIDERS[name](has[name], model, system, user) };
