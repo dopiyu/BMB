@@ -26,7 +26,7 @@ export async function callCoach(store, mode, payload) {
   } catch { const e = new Error('offline'); e.code = 'offline'; throw e; }
   let data = {};
   try { data = await res.json(); } catch {}
-  if (!res.ok) { const e = new Error(data.error || `http_${res.status}`); e.code = data.error || `http_${res.status}`; e.scope = data.scope; e.usage = data.usage; throw e; }
+  if (!res.ok) { const e = new Error(data.error || `http_${res.status}`); e.code = data.error || `http_${res.status}`; e.scope = data.scope; e.usage = data.usage; e.detail = [data.provider && `${data.provider} ${data.model || ''}`.trim(), data.detail].filter(Boolean).join(' · ') || `HTTP ${res.status}`; throw e; }
   return data;
 }
 
@@ -38,6 +38,7 @@ export const COACH_ERRORS = {
   unauthenticated: 'Your sign-in has expired. Log out from Profile and sign in again.',
   'bad-output': 'AI Coach sent back something unreadable. Try again.',
   'ai-error': 'AI Coach couldn\'t reply just now. Try again in a minute.',
+  'server-error': 'AI Coach hit a problem on our side. Try again in a minute.',
 };
 
 /* ---------- demo mode: a rule-based stand-in so the screens can be tried ---------- */

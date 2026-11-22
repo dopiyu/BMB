@@ -390,3 +390,4 @@ svg.body .lab.sel text { font-weight: 700; }
 .ob-coach span { display: flex; flex-direction: column; gap: 4px; }
 .ob-coach small { color: var(--muted); font-size: 13px; }
 @media (max-width: 380px) { .sets.nt { grid-template-columns: 22px minmax(0, 1fr) minmax(0, 1fr) 36px; } .wcard { flex-basis: 80%; } .h2 { font-size: 26px; } }
+.err-detail { display: block; margin-top: 6px; font-size: 12px; opacity: .85; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
