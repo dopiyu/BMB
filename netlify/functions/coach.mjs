@@ -173,7 +173,7 @@ function pickProvider() {
   const order = ['gemini', 'anthropic', 'openai'];
   const name = want && has[want] ? want : order.find((k) => has[k]);
   if (!name) return null;
-  const model = process.env.AI_MODEL || { anthropic: 'claude-haiku-5-5', gemini: 'gemini-2.5-flash', openai: 'gpt-4.1-mini' }[name];
+  const model = process.env.AI_MODEL || { anthropic: 'claude-haiku-5-5', gemini: 'gemini-3.8-flash', openai: 'gpt-4.1-mini' }[name];
   return { name, model, call: (system, user) => PROVIDERS[name](has[name], model, system, user) };
 }
 
