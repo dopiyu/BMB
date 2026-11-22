@@ -1,7 +1,7 @@
 import { createStore, isDemo } from './store.js';
 import {
   LIBRARY, TYPE_LABEL, MUSCLES, DEFAULT_PLAN, findEx, canon, musclesOf, kindOf, typeOf, classify,
-  coverage, volumeOf, setCount, setText, fmtKg, secsOf, historyOf, buildPlan, workoutMuscles, nextWorkoutId, clampRec,
+  coverage, volumeOf, setCount, setText, fmtKg, secsOf, historyOf, buildPlan, workoutMuscles, nextWorkoutId, clampRec, starterFor, PLAN_VERSION,
 } from './program.js';
 import { bodySVG } from './bodymap.js';
 import { QUESTIONS, ONBOARDING_VERSION, answerLabel } from './onboarding.js';
@@ -107,14 +107,25 @@ const S = {
   profile: {}, profileLoaded: false, punsub: null,
   route: routeFromHash(),
   draft: null, saving: false, formErr: '', exErr: {},
-  sheet: null,
+  sheet: null, moreOpen: false, dateOpen: false,
   hist: { mode: 'week', anchor: today(), open: new Set(), confirm: null },
   prog: { filter: 'all', view: 'front', sel: null },
   ob: null,
   coachBusy: null, coachErr: '', coachOffConfirm: false,
 };
 
-const plan = () => (S.profile.plan?.workouts?.length ? S.profile.plan : DEFAULT_PLAN);
+let planMemo = { key: '', plan: null };
+const plan = () => {
+  const p = S.profile.plan, ans = S.profile.onboarding?.answers;
+  if (!p?.workouts?.length) return DEFAULT_PLAN;
+  // Plans saved before the Push / Pull / Lower rules are rebuilt from the saved answers.
+  if (p.source === 'onboarding' && (p.version || 1) < PLAN_VERSION && ans) {
+    const key = JSON.stringify(ans);
+    if (planMemo.key !== key) planMemo = { key, plan: buildPlan(ans) };
+    return planMemo.plan;
+  }
+  return p;
+};
 const coach = () => S.profile.coach || {};
 const coachOn = () => !!coach().enabled;
 const recFor = (name) => (coachOn() ? coach().recs?.[canon(name)] || null : null);
@@ -122,7 +133,7 @@ const isPartial = (s) => s.status === 'in-progress';
 const label = (s) => s.workoutName || TYPE_LABEL[typeOf(s)] || 'Workout';
 const needsOnboarding = () => S.profileLoaded && !S.profile.onboarding?.done;
 const forcedOnboarding = () => needsOnboarding() && S.loaded && S.sessions.length === 0;
-const FREESTYLE = { id: 'freestyle', name: 'Freestyle', exercises: [] };
+const FREESTYLE = { id: 'freestyle', name: 'Your own workout', exercises: [] };
 const workoutById = (id) => (id === 'freestyle' ? FREESTYLE : plan().workouts.find((w) => w.id === id) || null);
 const recommendedId = () => {
   const p = plan(); const c = coach();
@@ -139,6 +150,14 @@ function newDraft(date = today()) {
     exercises: [], cardio: [{ type: 'Brisk walk', km: null, min: null }], notes: '' };
 }
 const blankEx = (name, kind) => ({ name, kind: kind || findEx(name)?.kind || 'weight', sets: [{}, {}, {}], saved: false });
+// Target shown on an exercise: AI Coach's recommendation, or small starting values when there's no history.
+function tgtFor(e) {
+  const r = recFor(e.name);
+  if (r) return { src: 'ai', kind: r.kind || e.kind, sets: r.sets, note: r.note };
+  const had = historyOf(e.name, S.sessions.filter((s) => s.id !== S.draft?.editingId && s.date !== S.draft?.date), S.draft?.date || today()).length;
+  if (!had) { const st = starterFor(e.name); return { src: 'start', kind: e.kind || st.kind, sets: st.sets, note: 'New exercise. Start light and focus on form.' }; }
+  return null;
+}
 function pickWorkout(id) {
   const d = S.draft; const w = workoutById(id); if (!w) return;
   const saved = d.exercises.filter((e) => e.saved);
@@ -254,94 +273,104 @@ function homeView() {
   const head = `<header class="top"><p class="eyebrow">${fLong(today())}</p><h1 class="h1">Hi, ${esc(first)}</h1></header>`;
   const doneToday = S.sessions.find((s) => s.date === today() && !isPartial(s));
   if (doneToday && !d.editingId && !touched(d)) return head + onboardingBanner() + doneView(doneToday);
+  return head + onboardingBanner() + (d.workoutId ? workoutView() : chooser());
+}
 
-  const clash = S.sessions.find((s) => s.date === d.date && s.id !== d.editingId && !isPartial(s));
-  const w = d.workoutId ? workoutById(d.workoutId) : null;
-  const savedCount = d.exercises.filter((e) => e.saved).length;
-  return head + onboardingBanner() + `
-  <section class="pick">
-    <div class="pick-head">
-      <div><p class="eyebrow">${d.editingId ? 'Editing workout' : 'Today\'s workout'}</p><h2 class="h2">${d.workoutId ? esc(d.workoutName) : 'What are you training today?'}</h2></div>
-      <label class="date-chip"><span class="sr">Workout date</span><input type="date" id="d-date" data-f="date" value="${d.date}" max="${today()}"></label>
-    </div>
-    ${carousel()}
+const estMin = (n) => Math.max(20, n * 8);
+function dateLine() {
+  const d = S.draft;
+  const lbl = d.date === today() ? 'today' : fShort(d.date);
+  return `<div class="date-line">
+    ${S.dateOpen ? `<label class="date-chip"><span class="sr">Workout date</span><input type="date" id="d-date" data-f="date" value="${d.date}" max="${today()}"></label>`
+      : `<span class="fine">Logging for <b>${lbl}</b></span><button type="button" class="link small" data-act="pickDate">Change date</button>`}
+  </div>`;
+}
+
+function chooser() {
+  const w = workoutById(recommendedId()) || plan().workouts[0];
+  const mus = workoutMuscles(w).slice(0, 4);
+  return `<section class="choose" aria-label="Choose today's workout">
+    <button type="button" class="opt-card rec" data-act="startRec">
+      <span class="badge">${ic('ai')} ${coachOn() ? 'Recommended by AI Coach' : 'Recommended for you'}</span>
+      <span class="opt-title">${esc(w.name)}</span>
+      <span class="opt-meta">${w.exercises.length} exercises · about ${estMin(w.exercises.length)} min</span>
+      <span class="opt-chips">${mus.map((m) => `<i>${esc(m)}</i>`).join('')}</span>
+      <span class="opt-cta">Start workout ${ic('chev')}</span>
+    </button>
+    <button type="button" class="opt-card" data-act="startCustom">
+      <span class="opt-title small">Create your own</span>
+      <span class="opt-meta">Pick your exercises. ${coachOn() ? 'AI Coach suggests sets and reps from your history.' : 'New exercises get small starting values.'}</span>
+      <span class="opt-cta">Start ${ic('chev')}</span>
+    </button>
   </section>
-  ${clash ? `<div class="banner warn">You already logged ${fShort(d.date)}. Saving replaces that workout. <button type="button" class="link" data-act="openSaved" data-id="${clash.id}">Open it</button></div>` : ''}
-  ${!coachOn() && w ? `<button type="button" class="cta-coach" data-act="go" data-r="coach">${ic('ai')}<span><b>Enable AI Coach</b><small>Get sets, reps and weights picked for you after every workout</small></span>${ic('chev')}</button>` : ''}
-  ${!w ? `<div class="empty small-empty">Pick a workout above to see its exercises.</div>` : `
-  ${coachOn() && d.exercises.some((e) => !e.saved && recFor(e.name)) ? `<button type="button" class="btn small rec-all" data-act="fillall">${ic('ai')} Fill all AI Coach recommendations</button>` : ''}
-  <div class="stack">${d.exercises.map((e, i) => exCard(e, i)).join('') || '<div class="empty small-empty">No exercises yet. Add one below.</div>'}</div>
+  ${dateLine()}
+  ${!coachOn() ? `<button type="button" class="cta-coach" data-act="go" data-r="coach">${ic('ai')}<span><b>Enable AI Coach</b><small>Get sets, reps and weights picked for you after every workout</small></span>${ic('chev')}</button>` : ''}`;
+}
+
+function workoutView() {
+  const d = S.draft;
+  const clash = S.sessions.find((s) => s.date === d.date && s.id !== d.editingId && !isPartial(s));
+  const total = d.exercises.length, done = d.exercises.filter((e) => e.saved).length;
+  const custom = d.workoutId === 'freestyle';
+  const extras = d.cardio.some((c) => c.km != null || c.min != null) || (d.notes || '').trim();
+  return `<section class="wk-head">
+    <div class="wk-row">
+      <div><p class="eyebrow">${d.editingId && d.status === 'complete' ? 'Editing' : custom ? 'Created by you' : coachOn() ? 'Recommended by AI Coach' : 'Recommended'}</p><h2 class="h2">${esc(custom ? 'Your workout' : d.workoutName)}</h2></div>
+      ${!done && !d.editingId ? '<button type="button" class="btn small" data-act="switch">Change</button>' : ''}
+    </div>
+    ${total ? `<div class="wk-prog"><div class="ob-bar"><i style="width:${(done / total) * 100}%"></i></div><span class="fine">${done} of ${total} done</span></div>` : ''}
+    ${dateLine()}
+  </section>
+  ${clash ? `<div class="banner warn">You already logged ${fShort(d.date)}. Finishing replaces that workout. <button type="button" class="link" data-act="openSaved" data-id="${clash.id}">Open it</button></div>` : ''}
+  <div class="ex-list">${d.exercises.map((e, i) => exRow(e, i)).join('') || `<div class="empty small-empty">${custom ? 'Add your first exercise.' : 'No exercises yet.'}</div>`}</div>
   <button type="button" class="btn dashed block" data-act="addEx">${ic('plus')} Add exercise</button>
-  ${cardioCard()}
-  <section class="card"><label class="lbl" for="d-notes">Notes</label><textarea id="d-notes" data-f="notes" rows="2" placeholder="How it felt, machine used, any pain">${esc(d.notes)}</textarea></section>
+  <section class="more${S.moreOpen ? ' open' : ''}">
+    <button type="button" class="more-head" data-act="toggleMore" aria-expanded="${S.moreOpen}"><span>Cardio and notes${extras && !S.moreOpen ? ' · added' : ''}</span>${ic('down', 'chev')}</button>
+    ${S.moreOpen ? `<div class="more-body">${cardioCard()}<label class="lbl" for="d-notes">Notes</label><textarea id="d-notes" data-f="notes" rows="2" placeholder="How it felt, machine used, any pain">${esc(d.notes)}</textarea></div>` : ''}
+  </section>
   ${S.formErr ? `<p class="err" role="alert">${esc(S.formErr)}</p>` : ''}
   <div class="finish">
-    <p class="fine">${savedCount ? `${savedCount} of ${d.exercises.length} exercises saved.` : 'Save each exercise as you finish it, or log everything at the end.'}${coachOn() ? ' AI Coach reviews the workout when you finish.' : ''}</p>
-    <div class="save-row">
-      <button type="button" class="btn primary grow" data-act="finish" ${S.saving ? 'disabled' : ''}>${S.saving ? 'Saving…' : d.status === 'complete' && d.editingId ? 'Update workout' : 'Finish workout'}</button>
-      <button type="button" class="btn" data-act="discard">${d.editingId ? 'Cancel' : 'Reset'}</button>
-    </div>
-  </div>`}`;
+    <button type="button" class="btn primary block" data-act="finish" ${S.saving ? 'disabled' : ''}>${S.saving ? 'Saving…' : d.status === 'complete' && d.editingId ? 'Update workout' : 'Finish workout'}</button>
+    <p class="fine center">${coachOn() ? 'AI Coach reviews your workout when you finish. ' : ''}<button type="button" class="link small" data-act="discard">${d.editingId ? 'Cancel' : 'Start over'}</button></p>
+  </div>`;
 }
 
-function carousel() {
-  const d = S.draft; const rec = recommendedId();
-  const cards = [...plan().workouts, FREESTYLE].map((w) => {
-    const on = d.workoutId === w.id;
-    const mus = w.id === 'freestyle' ? 'Log anything you like' : workoutMuscles(w).slice(0, 4).join(' · ');
-    const meta = w.id === 'freestyle' ? 'Your own exercises' : `${w.exercises.length} exercises · about ${Math.max(20, w.exercises.length * 8)} min`;
-    return `<button type="button" class="wcard${on ? ' on' : ''}" data-act="pickW" data-id="${w.id}" aria-pressed="${on}">
-      ${w.id === rec && !d.editingId ? '<span class="badge">Recommended</span>' : '<span class="badge ghost" aria-hidden="true"></span>'}
-      <span class="wname">${esc(w.name)}</span><span class="wmeta">${esc(meta)}</span><span class="wmus">${esc(mus)}</span>
-      ${on ? `<span class="wcheck">${ic('check')}</span>` : ''}</button>`;
-  }).join('');
-  return `<div class="carousel" role="group" aria-label="Choose a workout">${cards}</div>`;
-}
-
-function exCard(e, i) {
+const tgtLabel = (t) => (t.src === 'ai' ? 'AI Coach' : 'Start with');
+function exRow(e, i) {
   const d = S.draft;
   const kind = e.kind || kindOf(e.name, e.sets);
   const name = findEx(e.name)?.name || e.name;
-  const mus = Object.entries(musclesOf(e.name)).filter(([, w]) => w === 2).map(([m]) => MUSCLES[m].name);
+  const open = d.open === i;
+  const t = tgtFor(e);
   const prev = historyOf(e.name, S.sessions.filter((s) => s.id !== d.editingId && s.date !== d.date), d.date)[0];
-  const last = prev ? `<p class="last"><span>Last · ${fShort(prev.date)}</span> ${prev.ex.sets.map((s) => setText(s, kind)).join(' · ')}</p>` : '<p class="last"><span>No history yet</span></p>';
-  if (e.saved) {
-    return `<article class="card ex saved">
-      <div class="ex-head"><div class="ex-title"><h3>${esc(name)}</h3><p class="mus-tags">${e.sets.map((s) => setText(s, kind)).join(' · ')}</p></div>
-      <span class="pill up">${ic('check')} Saved</span></div>
-      <div class="ex-foot"><button type="button" class="btn small" data-act="editEx" data-i="${i}">Edit</button></div>
-    </article>`;
-  }
-  const rec = recFor(e.name);
-  const hasT = !!rec;
-  const hdr = `<span>Set</span>${kind === 'time' ? '<span>Seconds</span><span></span>' : kind === 'bodyweight' ? '<span>Reps</span><span></span>' : '<span>Kg</span><span>Reps</span>'}${hasT ? '<span>AI target</span>' : ''}<span></span>`;
+  const sub = e.saved ? e.sets.map((s) => setText(s, kind)).join(' · ')
+    : t ? `${tgtLabel(t)}: ${recSummary(t.kind, t.sets)}` : prev ? `Last: ${prev.ex.sets.map((s) => setText(s, kind)).join(' · ')}` : 'Tap to log';
+  const headBtn = `<button type="button" class="ex-row-head" data-act="openEx" data-i="${i}" aria-expanded="${open}">
+      <span class="ex-dot${e.saved ? ' done' : ''}">${e.saved ? ic('check') : i + 1}</span>
+      <span class="ex-row-txt"><b>${esc(name)}</b><small>${esc(sub)}</small></span>${ic('down', 'chev')}</button>`;
+  if (!open) return `<article class="ex-row${e.saved ? ' saved' : ''}">${headBtn}</article>`;
+  const hdr = `<span>Set</span>${kind === 'time' ? '<span>Seconds</span><span></span>' : kind === 'bodyweight' ? '<span>Reps</span><span></span>' : '<span>Kg</span><span>Reps</span>'}<span></span>`;
   const rows = e.sets.map((s, j) => {
-    const t = hasT ? rec.sets[Math.min(j, rec.sets.length - 1)] : null;
-    const tl = t ? (kind === 'time' ? `${t.secs}s` : kind === 'bodyweight' ? `${t.reps}` : `${fmtKg(t.kg)}×${t.reps}`) : '';
-    const used = t && (kind === 'time' ? s.secs === t.secs : kind === 'bodyweight' ? s.reps === t.reps : s.kg === t.kg && s.reps === t.reps);
     const inA = kind === 'time'
       ? `<input id="e${i}s${j}secs" type="number" inputmode="numeric" min="0" step="5" aria-label="Set ${j + 1} seconds" data-f="secs" data-i="${i}" data-j="${j}" value="${s.secs ?? ''}">`
       : kind === 'bodyweight' ? `<input id="e${i}s${j}reps" type="number" inputmode="numeric" min="0" aria-label="Set ${j + 1} reps" data-f="reps" data-i="${i}" data-j="${j}" value="${s.reps ?? ''}">`
         : `<input id="e${i}s${j}kg" type="number" inputmode="decimal" min="0" step="0.5" aria-label="Set ${j + 1} weight in kg" data-f="kg" data-i="${i}" data-j="${j}" value="${s.kg ?? ''}">`;
     const inB = kind === 'weight' ? `<input id="e${i}s${j}reps" type="number" inputmode="numeric" min="0" aria-label="Set ${j + 1} reps" data-f="reps" data-i="${i}" data-j="${j}" value="${s.reps ?? ''}">` : '<span></span>';
-    return `<span class="setno">${j + 1}</span>${inA}${inB}
-      ${hasT ? `<button type="button" class="chip${used ? ' used' : ''}" data-act="use" data-i="${i}" data-j="${j}" aria-label="Use AI Coach target ${tl} for set ${j + 1}">${used ? ic('check') : ''}${tl}</button>` : ''}
-      <button type="button" class="icon" data-act="rmSet" data-i="${i}" data-j="${j}" aria-label="Remove set ${j + 1}">${ic('x')}</button>`;
+    return `<span class="setno">${j + 1}</span>${inA}${inB}<button type="button" class="icon" data-act="rmSet" data-i="${i}" data-j="${j}" aria-label="Remove set ${j + 1}">${ic('x')}</button>`;
   }).join('');
-  const recBox = rec ? `<div class="target"><span class="target-lbl">${ic('ai')} AI Coach's Recommendation</span><b>${recSummary(rec.kind || kind, rec.sets)}</b>${rec.note ? `<span>${esc(rec.note)}</span>` : ''}</div>` : '';
-  return `<article class="card ex">
-    <div class="ex-head">
-      <div class="ex-title"><h3>${esc(name)}</h3>${mus.length ? `<p class="mus-tags">${mus.join(' · ')}</p>` : ''}</div>
-      <button type="button" class="icon" data-act="rmEx" data-i="${i}" aria-label="Remove ${esc(name)}">${ic('x')}</button>
-    </div>
-    ${last}
-    ${recBox}
-    <div class="sets ${kind}${hasT ? '' : ' nt'}">${hdr}${rows}</div>
-    ${S.exErr[i] ? `<p class="err" role="alert">${esc(S.exErr[i])}</p>` : ''}
-    <div class="ex-foot">
-      <button type="button" class="btn small" data-act="addSet" data-i="${i}">${ic('plus')} Set</button>
-      ${hasT ? `<button type="button" class="btn small" data-act="useAll" data-i="${i}">${ic('check')} Use targets</button>` : ''}
-      <button type="button" class="btn small primary push" data-act="saveEx" data-i="${i}">Save exercise</button>
+  return `<article class="ex-row open${e.saved ? ' saved' : ''}">
+    ${headBtn}
+    <div class="ex-body">
+      ${t ? `<div class="target${t.src === 'start' ? ' start' : ''}"><span class="target-lbl">${t.src === 'ai' ? `${ic('ai')} AI Coach's Recommendation` : 'Starting point'}</span><b>${recSummary(t.kind, t.sets)}</b>${t.note ? `<span>${esc(t.note)}</span>` : ''}
+        <button type="button" class="btn small use-t" data-act="useAll" data-i="${i}">${ic('check')} Use these</button></div>` : ''}
+      ${prev ? `<p class="last"><span>Last · ${fShort(prev.date)}</span> ${prev.ex.sets.map((s) => setText(s, kind)).join(' · ')}</p>` : ''}
+      <div class="sets nt ${kind}">${hdr}${rows}</div>
+      ${S.exErr[i] ? `<p class="err" role="alert">${esc(S.exErr[i])}</p>` : ''}
+      <div class="ex-foot">
+        <button type="button" class="btn small" data-act="addSet" data-i="${i}">${ic('plus')} Set</button>
+        <button type="button" class="btn small danger-lite" data-act="rmEx" data-i="${i}">Remove</button>
+        <button type="button" class="btn small primary push" data-act="saveEx" data-i="${i}">${e.saved ? 'Update' : 'Save'}</button>
+      </div>
     </div>
   </article>`;
 }
@@ -727,7 +756,7 @@ async function runCoach(mode, extra = {}) {
       c.qa = [{ q: extra.question, a: String(result.answer).slice(0, 1200), at: new Date().toISOString() }, ...(c.qa || [])].slice(0, 10);
     } else {
       const p = plan();
-      const allowed = new Set(p.workouts.flatMap((w) => w.exercises).map(canon));
+      const allowed = new Set([...p.workouts.flatMap((w) => w.exercises), ...S.sessions.flatMap((s) => (s.exercises || []).map((e) => e.name))].map(canon));
       const recs = {};
       (result.recommendations || []).forEach((r) => {
         const k = canon(r && r.exercise); if (!k || !allowed.has(k)) return;
@@ -761,12 +790,12 @@ async function runCoach(mode, extra = {}) {
 
 /* ---------- workout saving ---------- */
 function fillSet(i, j) {
-  const e = S.draft.exercises[i]; const r = recFor(e.name); if (!r) return;
-  const t = r.sets[Math.min(j, r.sets.length - 1)];
-  const kind = e.kind || r.kind;
-  if (kind === 'time') e.sets[j] = { secs: t.secs };
-  else if (kind === 'bodyweight') e.sets[j] = { kg: null, reps: t.reps };
-  else e.sets[j] = { kg: t.kg, reps: t.reps };
+  const e = S.draft.exercises[i]; const t = tgtFor(e); if (!t) return;
+  const v = t.sets[Math.min(j, t.sets.length - 1)];
+  const kind = e.kind || t.kind;
+  if (kind === 'time') e.sets[j] = { secs: v.secs };
+  else if (kind === 'bodyweight') e.sets[j] = { kg: null, reps: v.reps };
+  else e.sets[j] = { kg: v.kg, reps: v.reps };
 }
 function cleanSets(e) {
   const kind = e.kind || kindOf(e.name);
@@ -801,6 +830,8 @@ async function saveExercise(i) {
   if (!sets.length) { S.exErr[i] = 'Fill in at least one set before saving.'; return render(); }
   delete S.exErr[i];
   e.sets = sets.map((x) => ({ ...x })); e.saved = true;
+  const nextOpen = d.exercises.findIndex((x, k) => k > i && !x.saved);
+  d.open = nextOpen >= 0 ? nextOpen : d.exercises.findIndex((x) => !x.saved);
   try {
     await persist(d.status === 'complete' && d.editingId ? 'complete' : 'in-progress');
     toast(`${findEx(e.name)?.name || e.name} saved`);
@@ -863,21 +894,23 @@ app.addEventListener('click', async (ev) => {
     case 'obClose': S.ob = null; location.hash = 'home'; return;
     case 'obFinish': await finishOnboarding(); return;
     // home
-    case 'pickW': if (d.workoutId === b.dataset.id) return; pickWorkout(b.dataset.id); S.exErr = {}; break;
-    case 'fillall': d.exercises.forEach((e, x) => { if (!e.saved && recFor(e.name)) e.sets.forEach((_, y) => fillSet(x, y)); }); toast('Targets filled. Change any set you did differently.'); break;
-    case 'use': fillSet(i, j); break;
-    case 'useAll': d.exercises[i].sets.forEach((_, y) => fillSet(i, y)); break;
+    case 'startRec': pickWorkout(recommendedId()); d.open = 0; S.exErr = {}; break;
+    case 'startCustom': pickWorkout('freestyle'); d.open = -1; S.exErr = {}; saveDraft(); render(); S.sheet = { q: '' }; renderSheet(); setTimeout(() => document.getElementById('sheet-q')?.focus(), 50); return;
+    case 'switch': d.workoutId = null; d.workoutName = ''; d.exercises = d.exercises.filter((e) => e.saved); d.open = -1; S.exErr = {}; break;
+    case 'openEx': d.open = d.open === i ? -1 : i; saveDraft(); render(); document.querySelectorAll('.ex-row')[i]?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return;
+    case 'toggleMore': S.moreOpen = !S.moreOpen; break;
+    case 'pickDate': S.dateOpen = true; render(); setTimeout(() => { const el = document.getElementById('d-date'); el?.focus(); try { el?.showPicker?.(); } catch {} }, 30); return;
+    case 'useAll': { const e = d.exercises[i]; const t = tgtFor(e); if (t && e.sets.length < t.sets.length) while (e.sets.length < t.sets.length) e.sets.push({}); e.sets.forEach((_, y) => fillSet(i, y)); break; }
     case 'addSet': { const s = d.exercises[i].sets; s.push({ ...(s[s.length - 1] || {}) }); break; }
     case 'rmSet': d.exercises[i].sets.splice(j, 1); if (!d.exercises[i].sets.length) d.exercises[i].sets.push({}); break;
-    case 'rmEx': d.exercises.splice(i, 1); S.exErr = {}; break;
+    case 'rmEx': d.exercises.splice(i, 1); S.exErr = {}; d.open = -1; break;
     case 'saveEx': await saveExercise(i); return;
-    case 'editEx': d.exercises[i].saved = false; if (d.exercises[i].sets.length < 1) d.exercises[i].sets.push({}); break;
     case 'addEx': S.sheet = { q: '' }; saveDraft(); render(); setTimeout(() => document.getElementById('sheet-q')?.focus(), 50); return;
     case 'addCardio': d.cardio.push({ type: 'Brisk walk', km: null, min: null }); break;
     case 'rmCardio': d.cardio.splice(i, 1); break;
     case 'openSaved': { const s = S.sessions.find((x) => x.id === b.dataset.id); if (s) { S.draft = draftFromSession(s); S.formErr = ''; S.exErr = {}; location.hash = 'home'; S.route = 'home'; window.scrollTo({ top: 0 }); } break; }
     case 'otherDate': S.draft = { ...newDraft(addDays(today(), -1)), forceEdit: true }; break;
-    case 'discard': clearDraft(); S.draft = newDraft(); S.formErr = ''; S.exErr = {}; window.scrollTo({ top: 0 }); render(); return;
+    case 'discard': clearDraft(); S.draft = newDraft(); S.formErr = ''; S.exErr = {}; S.moreOpen = false; S.dateOpen = false; window.scrollTo({ top: 0 }); render(); return;
     case 'finish': await finishWorkout(); return;
     case 'go': location.hash = b.dataset.r; return;
     case 'retry': S.unsub?.(); S.loaded = false; S.loadErr = null; render(); subscribe(); return;
@@ -946,9 +979,10 @@ sheetEl.addEventListener('click', (ev) => {
     const name = act === 'pick' ? b.dataset.n : S.sheet.q.trim();
     const kind = act === 'pick' ? findEx(name).kind : b.dataset.k;
     S.draft.exercises.push(blankEx(name, kind));
-    if (!S.draft.workoutId) { S.draft.workoutId = 'freestyle'; S.draft.workoutName = 'Freestyle'; }
+    if (!S.draft.workoutId) { S.draft.workoutId = 'freestyle'; S.draft.workoutName = FREESTYLE.name; }
+    S.draft.open = S.draft.exercises.length - 1;
     S.sheet = null; saveDraft(); render();
-    const cards = document.querySelectorAll('.ex'); cards[cards.length - 1]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const rows = document.querySelectorAll('.ex-row'); rows[rows.length - 1]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
     toast(`${name} added`);
   }
 });
@@ -981,7 +1015,7 @@ app.addEventListener('change', async (ev) => {
     const open = S.sessions.find((s) => s.date === t.value && s.id !== S.draft.editingId);
     if (open && isPartial(open)) S.draft = draftFromSession(open);
     else { S.draft.date = t.value; S.draft.forceEdit = true; }
-    saveDraft(); render();
+    S.dateOpen = false; saveDraft(); render();
   }
   else if (f === 'obcoach') { S.ob.enable = t.checked; }
   else if (f === 'hpick' && t.value) { S.hist.anchor = S.hist.mode === 'month' ? `${t.value}-01` : t.value; render(); }

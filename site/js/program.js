@@ -250,6 +250,8 @@ const POOLS = {
     pull: ['Seated cable row', 'Dumbbell row'],
     vpull: ['Lat pulldown', 'Seated cable row'],
     shoulder: ['Shoulder press', 'Lateral raise'],
+    push2: ['Pec fly', 'Dumbbell bench press', 'Push-ups'],
+    rear: ['Face pull', 'Lateral raise'],
     knee: ['Angled leg press', 'Goblet squat', 'Leg extension'],
     knee2: ['Leg extension', 'Angled leg press'],
     hinge: ['Romanian deadlift', 'Hip thrust', 'Glute bridge'],
@@ -265,6 +267,8 @@ const POOLS = {
     pull: ['Dumbbell row'],
     vpull: ['Dumbbell row'],
     shoulder: ['Dumbbell shoulder press', 'Lateral raise'],
+    push2: ['Push-ups', 'Dumbbell bench press'],
+    rear: ['Lateral raise', 'Dumbbell row'],
     knee: ['Goblet squat', 'Squats'],
     knee2: ['Lunges', 'Squats'],
     hinge: ['Romanian deadlift', 'Glute bridge'],
@@ -280,12 +284,14 @@ const POOLS = {
     pull: ['Superman hold'],
     vpull: ['Superman hold'],
     shoulder: ['Push-ups'],
+    push2: ['Push-ups'],
+    rear: ['Superman hold'],
     knee: ['Squats'],
     knee2: ['Lunges', 'Wall sit'],
     hinge: ['Glute bridge'],
     ham: ['Glute bridge'],
-    arms: ['Push-ups'],
-    arms2: ['Dead bug'],
+    arms: [],
+    arms2: [],
     core: ['Plank'],
     core2: ['Dead bug', 'Plank'],
     calf: ['Wall sit'],
@@ -298,21 +304,25 @@ const AVOID = {
   shoulders: ['Shoulder press', 'Dumbbell shoulder press', 'Lateral raise'],
 };
 
+export const PLAN_VERSION = 2;
+
+// 2 days a week: Upper / Lower. 3 or more: Push / Pull / Lower body.
 const LAYOUTS = {
-  full: [
-    { id: 'full-a', name: 'Full body A', slots: ['push', 'vpull', 'knee', 'hinge', 'core', 'arms'] },
-    { id: 'full-b', name: 'Full body B', slots: ['shoulder', 'pull', 'knee2', 'ham', 'core2', 'arms2'] },
-  ],
   upperlower: [
-    { id: 'upper', name: 'Upper body', slots: ['push', 'pull', 'shoulder', 'vpull', 'core', 'arms', 'arms2'] },
-    { id: 'lower', name: 'Lower body', slots: ['hinge', 'knee', 'knee2', 'ham', 'core', 'calf', 'core2'] },
+    { id: 'upper', name: 'Upper body', slots: ['push', 'pull', 'shoulder', 'vpull', 'arms', 'arms2', 'core'] },
+    { id: 'lower', name: 'Lower body', slots: ['knee', 'hinge', 'knee2', 'ham', 'calf', 'core2'] },
+  ],
+  ppl: [
+    { id: 'push', name: 'Push', slots: ['push', 'shoulder', 'push2', 'arms2', 'core'] },
+    { id: 'pull', name: 'Pull', slots: ['vpull', 'pull', 'rear', 'arms', 'core2'] },
+    { id: 'lower', name: 'Lower body', slots: ['knee', 'hinge', 'knee2', 'ham', 'calf', 'core'] },
   ],
 };
 
 // answers: { goal, experience, days, place, length, limits: [] }
 export function buildPlan(a = {}) {
   const days = Number(a.days) || 3;
-  const split = days >= 4 && a.experience !== 'new' ? 'upperlower' : 'full';
+  const split = days <= 2 ? 'upperlower' : 'ppl';
   const pool = POOLS[a.place] || POOLS.gym;
   const banned = new Set((a.limits || []).flatMap((l) => AVOID[l] || []));
   const per = { 30: 4, 45: 5, 60: 6 }[Number(a.length)] || 5;
@@ -325,7 +335,19 @@ export function buildPlan(a = {}) {
     }
     return { id: w.id, name: w.name, exercises: picked };
   });
-  return { source: 'onboarding', split, days, workouts };
+  return { source: 'onboarding', version: PLAN_VERSION, split, days, workouts };
+}
+
+// Starting values for an exercise someone has never logged.
+export function starterFor(name) {
+  const def = findEx(name);
+  const kind = def ? def.kind : 'weight';
+  const three = (x) => [0, 1, 2].map(() => ({ ...x }));
+  if (kind === 'time') return { kind, sets: three({ secs: 20 }) };
+  if (kind === 'bodyweight') return { kind, sets: three({ kg: null, reps: 8 }) };
+  const step = def?.step ?? 2.5;
+  const kg = def?.start ? Math.max(step, Math.round((def.start * 0.75) / step) * step) : 5;
+  return { kind, sets: three({ kg, reps: 10 }) };
 }
 
 export function workoutMuscles(w) {
@@ -343,7 +365,17 @@ export function nextWorkoutId(plan, sessions) {
   let lastId = last.workoutId;
   if (!ids.includes(lastId)) {
     const t = typeOf(last);
-    lastId = ids.includes(t) ? t : (plan.split === 'full' ? ids[(done.length - 1) % ids.length] : null);
+    if (ids.includes(t)) lastId = t;
+    else if (plan.split === 'ppl' && t === 'upper') {
+      // Older sessions were tagged "upper": call it Push or Pull by which muscles led.
+      let push = 0, pull = 0;
+      (last.exercises || []).forEach((e) => Object.entries(musclesOf(e.name)).forEach(([m, w]) => {
+        if (w !== 2) return;
+        if (['chest', 'shoulders', 'triceps'].includes(m)) push++;
+        if (['lats', 'mid-back', 'biceps', 'rear-delts'].includes(m)) pull++;
+      }));
+      lastId = push >= pull ? 'push' : 'pull';
+    } else lastId = null;
   }
   const i = ids.indexOf(lastId);
   return i < 0 ? ids[0] : ids[(i + 1) % ids.length];
@@ -378,11 +410,13 @@ export function clampRec(name, rec, sessions, date) {
     }
     const step = def?.step ?? 2.5;
     const top = Math.max(0, ...last.map((x) => x.kg || 0));
-    const max = top ? Math.max(top + step, Math.round((top * 1.1) / step) * step) : (def?.start ? def.start * 1.5 : 20);
+    // At most one machine step or 10%, whichever is bigger. Machines differ (39, 44, 52 kg…),
+    // so the value is not snapped to a step grid, only to the nearest 0.5 kg.
+    const max = top ? Math.max(top + step, top * 1.1) : (def?.start ? def.start * 1.5 : 20);
     let kg = Number(s.kg);
     if (!Number.isFinite(kg) || kg <= 0) kg = top || def?.start || null;
     if (kg != null && kg > max) { kg = max; capped = true; }
-    if (kg != null) kg = Math.round(kg / (step >= 1 ? step : 0.5)) * (step >= 1 ? step : 0.5);
+    if (kg != null) kg = Math.floor(kg * 2) / 2;
     let reps = Math.round(Number(s.reps) || 10);
     return { kg, reps: clampN(reps, 1, 20) };
   });

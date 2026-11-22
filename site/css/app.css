@@ -391,3 +391,54 @@ svg.body .lab.sel text { font-weight: 700; }
 .ob-coach small { color: var(--muted); font-size: 13px; }
 @media (max-width: 380px) { .sets.nt { grid-template-columns: 22px minmax(0, 1fr) minmax(0, 1fr) 36px; } .wcard { flex-basis: 80%; } .h2 { font-size: 26px; } }
 .err-detail { display: block; margin-top: 6px; font-size: 12px; opacity: .85; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+/* ---------- v4: two-option Home and one-at-a-time exercise list ---------- */
+.choose { display: flex; flex-direction: column; gap: 12px; }
+.opt-card { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; text-align: left; width: 100%; padding: 18px; border-radius: 22px; border: 1px solid var(--line); background: var(--surface); }
+.opt-card.rec { background: var(--plate); color: var(--plate-ink); border-color: var(--plate); }
+.opt-card .badge { display: inline-flex; align-items: center; gap: 5px; }
+.opt-card .badge .ic { width: 14px; height: 14px; }
+.opt-card.rec .badge { background: var(--accent); color: var(--accent-ink); }
+.opt-title { font-family: var(--display); font-weight: 800; font-size: 40px; line-height: .95; text-transform: uppercase; }
+.opt-title.small { font-size: 26px; }
+.opt-meta { font-size: 14px; color: var(--muted); }
+.opt-card.rec .opt-meta { color: var(--plate-muted); }
+.opt-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.opt-chips i { font-style: normal; font-size: 12px; padding: 4px 9px; border-radius: 999px; background: rgba(255, 255, 255, .1); color: var(--plate-ink); }
+.opt-cta { display: inline-flex; align-items: center; gap: 4px; font-weight: 700; color: var(--accent); margin-top: 2px; }
+.opt-cta .ic { width: 18px; height: 18px; }
+.date-line { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; min-height: 32px; }
+.date-line b { color: var(--ink); }
+.link.small { font-size: 13px; }
+
+.wk-head { display: flex; flex-direction: column; gap: 10px; }
+.wk-row { display: flex; justify-content: space-between; align-items: flex-end; gap: 12px; }
+.wk-prog { display: flex; align-items: center; gap: 10px; }
+.wk-prog .ob-bar { flex: 1; }
+
+.ex-list { display: flex; flex-direction: column; gap: 8px; }
+.ex-row { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.ex-row.saved { background: color-mix(in srgb, var(--good-soft) 40%, var(--surface)); }
+.ex-row.open { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+.ex-row-head { width: 100%; display: grid; grid-template-columns: 32px minmax(0, 1fr) 22px; gap: 12px; align-items: center; padding: 12px 14px; border: 0; background: transparent; text-align: left; min-height: 60px; }
+.ex-row-txt { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.ex-row-txt b { font-weight: 600; font-size: 15px; }
+.ex-row-txt small { font-size: 13px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ex-dot { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; font-family: var(--display); font-weight: 800; font-size: 16px; background: var(--surface-2); color: var(--muted); }
+.ex-dot.done { background: var(--good); color: var(--surface); }
+.ex-dot .ic { width: 16px; height: 16px; }
+.ex-row .chev { color: var(--muted); transition: transform .2s; }
+.ex-row.open .chev { transform: rotate(180deg); }
+.ex-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.target { position: relative; }
+.target.start { background: var(--surface-2); }
+.target.start .target-lbl { color: var(--muted); }
+.use-t { align-self: flex-start; margin-top: 4px; min-height: 36px; }
+.danger-lite { color: var(--bad); border-color: transparent; background: transparent; }
+
+.more { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; overflow: hidden; }
+.more-head { width: 100%; display: flex; justify-content: space-between; align-items: center; padding: 14px; border: 0; background: transparent; font-weight: 600; min-height: 52px; }
+.more-head .chev { color: var(--muted); transition: transform .2s; }
+.more.open .more-head .chev { transform: rotate(180deg); }
+.more-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 10px; }
+.more-body .card { border: 0; padding: 0; background: transparent; }
