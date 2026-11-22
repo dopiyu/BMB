@@ -8,6 +8,7 @@
 //   ANTHROPIC_API_KEY or GEMINI_API_KEY or OPENAI_API_KEY   (one is enough)
 //   AI_PROVIDER         optional: anthropic | gemini | openai (otherwise Gemini, then Anthropic, then OpenAI)
 //   AI_MODEL            optional: overrides the default model for that provider
+//   AI_FALLBACK_MODEL   optional: second model to try when the main one is busy
 //   AI_USER_DAILY_LIMIT optional: requests per person per day (default 10)
 //   AI_DAILY_LIMIT      optional: requests for the whole app per day (default 300)
 //   FIREBASE_PROJECT_ID optional: defaults to bmb---pwa
@@ -62,12 +63,13 @@ async function handle(req) {
   if (appUsed >= APP_LIMIT) return json(429, { error: 'limit-global', usage: { used: userUsed, limit: USER_LIMIT } });
   if (userUsed >= USER_LIMIT) return json(429, { error: 'limit', usage: { used: userUsed, limit: USER_LIMIT } });
 
-  let text;
+  let text, used = provider.model;
   try {
-    text = await provider.call(SYSTEM_PROMPT, userMessage(body));
+    ({ text, model: used } = await callWithRetry(provider, SYSTEM_PROMPT, userMessage(body)));
   } catch (e) {
     console.error('AI call failed', e?.message);
-    return json(502, { error: 'ai-error', detail: String(e?.message || '').slice(0, 240), provider: provider.name, model: provider.model });
+    const busy = e?.status === 429 || e?.status === 503 || e?.status === 529;
+    return json(busy ? 503 : 502, { error: busy ? 'ai-busy' : 'ai-error', detail: String(e?.message || '').slice(0, 240), provider: provider.name, model: used });
   }
   const result = parseJSON(text);
   if (!result || !validShape(body.mode, result)) {
@@ -76,7 +78,7 @@ async function handle(req) {
   }
 
   await Promise.all([counts.setJSON(userKey, userUsed + 1), counts.setJSON(appKey, appUsed + 1)]);
-  return json(200, { result, usage: { used: userUsed + 1, limit: USER_LIMIT }, model: provider.model });
+  return json(200, { result, usage: { used: userUsed + 1, limit: USER_LIMIT }, model: used });
 }
 
 /* ---------- the logic layer ---------- */
@@ -164,6 +166,27 @@ function validShape(mode, r) {
   return r.summary && typeof r.summary.headline === 'string' && Array.isArray(r.recommendations);
 }
 
+/* ---------- retries ---------- */
+// Busy or rate-limited replies (429, 500, 503, 529) are retried once after a short pause,
+// then once more on AI_FALLBACK_MODEL if it is set. Kept short to fit the function time limit.
+const RETRYABLE = new Set([429, 500, 503, 529]);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function callWithRetry(provider, system, user) {
+  const models = [provider.model, provider.model, process.env.AI_FALLBACK_MODEL].filter(Boolean);
+  let last;
+  for (let i = 0; i < models.length; i++) {
+    try {
+      return { text: await provider.callModel(models[i], system, user), model: models[i] };
+    } catch (e) {
+      last = e;
+      if (!RETRYABLE.has(e.status)) throw e;
+      if (i < models.length - 1) await sleep(i === 0 ? 1200 : 300);
+    }
+  }
+  throw last;
+}
+const providerError = (name, status, body) => Object.assign(new Error(`${name} ${status}: ${String(body).slice(0, 200)}`), { status });
+
 /* ---------- providers ---------- */
 function pickProvider() {
   const want = (process.env.AI_PROVIDER || '').toLowerCase();
@@ -173,8 +196,8 @@ function pickProvider() {
   const order = ['gemini', 'anthropic', 'openai'];
   const name = want && has[want] ? want : order.find((k) => has[k]);
   if (!name) return null;
-  const model = process.env.AI_MODEL || { anthropic: 'claude-haiku-5-5', gemini: 'gemini-2.5-flash', openai: 'gpt-4.1-mini' }[name];
-  return { name, model, call: (system, user) => PROVIDERS[name](has[name], model, system, user) };
+  const model = process.env.AI_MODEL || { anthropic: 'claude-haiku-5-5', gemini: 'gemini-3.8-flash', openai: 'gpt-4.1-mini' }[name];
+  return { name, model, callModel: (m, system, user) => PROVIDERS[name](has[name], m, system, user) };
 }
 
 const PROVIDERS = {
@@ -184,7 +207,7 @@ const PROVIDERS = {
       headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
       body: JSON.stringify({ model, max_tokens: 1500, system, messages: [{ role: 'user', content: user }] }),
     });
-    if (!r.ok) throw new Error(`anthropic ${r.status}: ${(await r.text()).slice(0, 200)}`);
+    if (!r.ok) throw providerError('anthropic', r.status, await r.text());
     const d = await r.json();
     return (d.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
   },
@@ -198,7 +221,7 @@ const PROVIDERS = {
         generationConfig: { responseMimeType: 'application/json', maxOutputTokens: 1500 },
       }),
     });
-    if (!r.ok) throw new Error(`gemini ${r.status}: ${(await r.text()).slice(0, 200)}`);
+    if (!r.ok) throw providerError('gemini', r.status, await r.text());
     const d = await r.json();
     return d.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
   },
@@ -208,10 +231,10 @@ const PROVIDERS = {
       headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
       body: JSON.stringify({ model, max_tokens: 1500, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
     });
-    if (!r.ok) throw new Error(`openai ${r.status}: ${(await r.text()).slice(0, 200)}`);
+    if (!r.ok) throw providerError('openai', r.status, await r.text());
     const d = await r.json();
     return d.choices?.[0]?.message?.content || '';
   },
 };
 
-export const _test = { parseJSON, validShape, userMessage, pickProvider };
+export const _test = { parseJSON, validShape, userMessage, pickProvider, callWithRetry };
