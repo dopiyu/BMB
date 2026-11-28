@@ -112,6 +112,7 @@ AI Coach runs on our own AI key through a Netlify function at `/api/coach`. The 
    | `AI_PROVIDER` | `anthropic`, `gemini` or `openai`. Set it if more than one key exists (Netlify's AI Gateway can add Anthropic and OpenAI keys on its own) | Gemini, then Anthropic, then OpenAI |
    | `AI_MODEL` | Model name for that provider | `claude-haiku-5-5`, `gemini-3.8-flash`, `gpt-4.1-mini` |
    | `AI_FALLBACK_MODEL` | A second model to try when the main one is busy (503), for example a lighter Flash model | none |
+   | `AI_TIMEOUT_MS` | How long to wait for the AI reply before giving up. Keep it under Netlify's function time limit | 9500 |
    | `AI_USER_DAILY_LIMIT` | Requests per person per day | 10 |
    | `AI_DAILY_LIMIT` | Requests for the whole app per day | 300 |
 4. Redeploy: Deploys → Trigger deploy → Deploy project.
