@@ -74,7 +74,9 @@ async function handle(req) {
     console.error('AI call failed', `${Date.now() - started} ms`, e?.message);
     if (e?.status === 'timeout') return json(504, { error: 'ai-slow', detail: `no reply within ${Math.round(TIMEOUT_MS / 1000)}s`, provider: provider.name, model: used });
     const busy = e?.status === 429 || e?.status === 503 || e?.status === 529;
-    return json(busy ? 503 : 502, { error: busy ? 'ai-busy' : 'ai-error', detail: String(e?.message || '').slice(0, 240), provider: provider.name, model: used });
+    // On a key error, say which variable was used (last 4 characters only) to make setup mistakes easy to spot.
+    const hint = e?.status === 401 || e?.status === 403 ? ` [key: ${provider.keyHint}]` : '';
+    return json(busy ? 503 : 502, { error: busy ? 'ai-busy' : 'ai-error', detail: String(e?.message || '').slice(0, 200) + hint, provider: provider.name, model: used });
   }
   const result = parseJSON(text);
   if (result && Array.isArray(result.recommendations)) result.recommendations = result.recommendations.map(expandRec);
@@ -219,7 +221,9 @@ function pickProvider() {
   const name = want && has[want] ? want : order.find((k) => has[k]);
   if (!name) return null;
   const model = process.env.AI_MODEL || { anthropic: 'claude-haiku-5-5', gemini: 'gemini-3.8-flash', openai: 'gpt-4.1-mini' }[name];
-  return { name, model, callModel: (m, system, user, signal) => PROVIDERS[name](has[name], m, system, user, signal) };
+  const keyVar = name === 'anthropic' ? (clean(process.env.CLAUDE_API_KEY) ? 'CLAUDE_API_KEY' : 'ANTHROPIC_API_KEY') : `${name.toUpperCase()}_API_KEY`;
+  const keyHint = `${keyVar} …${String(has[name]).slice(-4)}`;
+  return { name, model, keyHint, callModel: (m, system, user, signal) => PROVIDERS[name](has[name], m, system, user, signal) };
 }
 
 const PROVIDERS = {
