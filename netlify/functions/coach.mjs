@@ -5,7 +5,7 @@
 // 4. Returns structured JSON that the app applies, after its own safety caps.
 //
 // Environment variables (Netlify → Project configuration → Environment variables):
-//   ANTHROPIC_API_KEY or GEMINI_API_KEY or OPENAI_API_KEY   (one is enough)
+//   CLAUDE_API_KEY (preferred for Anthropic) or GEMINI_API_KEY or OPENAI_API_KEY   (one is enough)
 //   AI_PROVIDER         optional: anthropic | gemini | openai (otherwise Gemini, then Anthropic, then OpenAI)
 //   AI_MODEL            optional: overrides the default model for that provider
 //   AI_FALLBACK_MODEL   optional: second model to try when the main one is busy
@@ -191,7 +191,10 @@ const providerError = (name, status, body) => Object.assign(new Error(`${name} $
 /* ---------- providers ---------- */
 function pickProvider() {
   const want = (process.env.AI_PROVIDER || '').toLowerCase();
-  const has = { anthropic: process.env.ANTHROPIC_API_KEY, gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY };
+  // CLAUDE_API_KEY is our own name for the Anthropic key. Netlify's AI Gateway can inject its own
+  // ANTHROPIC_API_KEY that only works through the gateway, so CLAUDE_API_KEY wins when both exist.
+  const clean = (v) => (v || '').trim().replace(/^["']|["']$/g, '') || undefined;
+  const has = { anthropic: clean(process.env.CLAUDE_API_KEY) || clean(process.env.ANTHROPIC_API_KEY), gemini: clean(process.env.GEMINI_API_KEY), openai: clean(process.env.OPENAI_API_KEY) };
   // Gemini first: Netlify's AI Gateway can inject ANTHROPIC_API_KEY / OPENAI_API_KEY
   // that only work through its own gateway URL, not the providers' public APIs.
   const order = ['gemini', 'anthropic', 'openai'];
