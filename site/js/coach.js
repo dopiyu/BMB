@@ -38,6 +38,8 @@ export const COACH_ERRORS = {
   unauthenticated: 'Your sign-in has expired. Log out from Profile and sign in again.',
   'bad-output': 'AI Coach sent back something unreadable. Try again.',
   'ai-error': 'AI Coach couldn\'t reply just now. Try again in a minute.',
+  'ai-slow': 'AI Coach took too long to reply. Try again. This didn\'t use up any of your requests.',
+  http_504: 'AI Coach took too long to reply. Try again in a minute.',
   'ai-busy': 'The AI service is very busy right now. Try again in a minute or two. This didn\'t use up any of your requests.',
   'server-error': 'AI Coach hit a problem on our side. Try again in a minute.',
 };

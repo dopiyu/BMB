@@ -5,12 +5,13 @@
 // 4. Returns structured JSON that the app applies, after its own safety caps.
 //
 // Environment variables (Netlify → Project configuration → Environment variables):
-//   ANTHROPIC_API_KEY or GEMINI_API_KEY or OPENAI_API_KEY   (one is enough)
+//   CLAUDE_API_KEY (preferred for Anthropic) or GEMINI_API_KEY or OPENAI_API_KEY   (one is enough)
 //   AI_PROVIDER         optional: anthropic | gemini | openai (otherwise Gemini, then Anthropic, then OpenAI)
 //   AI_MODEL            optional: overrides the default model for that provider
 //   AI_FALLBACK_MODEL   optional: second model to try when the main one is busy
 //   AI_USER_DAILY_LIMIT optional: requests per person per day (default 10)
 //   AI_DAILY_LIMIT      optional: requests for the whole app per day (default 300)
+//   AI_TIMEOUT_MS       optional: total time allowed for the AI reply (default 9500, under Netlify's function limit)
 //   FIREBASE_PROJECT_ID optional: defaults to bmb---pwa
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { getStore } from '@netlify/blobs';
@@ -22,6 +23,7 @@ const JWKS = createRemoteJWKSet(new URL('https://www.googleapis.com/service_acco
 const USER_LIMIT = Number(process.env.AI_USER_DAILY_LIMIT) || 10;
 const APP_LIMIT = Number(process.env.AI_DAILY_LIMIT) || 300;
 const MODES = new Set(['analyze', 'onboard', 'ask']);
+const TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS) || 9500;
 
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 const istDay = () => new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
@@ -64,14 +66,20 @@ async function handle(req) {
   if (userUsed >= USER_LIMIT) return json(429, { error: 'limit', usage: { used: userUsed, limit: USER_LIMIT } });
 
   let text, used = provider.model;
+  const started = Date.now();
   try {
-    ({ text, model: used } = await callWithRetry(provider, SYSTEM_PROMPT, userMessage(body)));
+    ({ text, model: used } = await callWithRetry(provider, SYSTEM_PROMPT, userMessage(body), started + TIMEOUT_MS));
+    console.log(`AI reply ${provider.name} ${used} ${body.mode} in ${Date.now() - started} ms`);
   } catch (e) {
-    console.error('AI call failed', e?.message);
+    console.error('AI call failed', `${Date.now() - started} ms`, e?.message);
+    if (e?.status === 'timeout') return json(504, { error: 'ai-slow', detail: `no reply within ${Math.round(TIMEOUT_MS / 1000)}s`, provider: provider.name, model: used });
     const busy = e?.status === 429 || e?.status === 503 || e?.status === 529;
-    return json(busy ? 503 : 502, { error: busy ? 'ai-busy' : 'ai-error', detail: String(e?.message || '').slice(0, 240), provider: provider.name, model: used });
+    // On a key error, say which variable was used (last 4 characters only) to make setup mistakes easy to spot.
+    const hint = e?.status === 401 || e?.status === 403 ? ` [key: ${provider.keyHint}]` : '';
+    return json(busy ? 503 : 502, { error: busy ? 'ai-busy' : 'ai-error', detail: String(e?.message || '').slice(0, 200) + hint, provider: provider.name, model: used });
   }
   const result = parseJSON(text);
+  if (result && Array.isArray(result.recommendations)) result.recommendations = result.recommendations.map(expandRec);
   if (!result || !validShape(body.mode, result)) {
     console.error('Unreadable AI output', String(text).slice(0, 300));
     return json(502, { error: 'bad-output', detail: String(text || '(empty reply)').slice(0, 160), provider: provider.name, model: provider.model });
@@ -114,7 +122,7 @@ function userMessage(b) {
     name: b.firstName || '',
     onboarding: b.onboarding || null,
     plan: b.plan || null,
-    recentSessions: (b.sessions || []).slice(0, 10),
+    recentSessions: (b.sessions || []).slice(0, 8),
     justFinished: b.justFinished || null,
     coachMemory: (b.memory || []).slice(0, 12),
     previousSummary: b.previousSummary || null,
@@ -143,14 +151,22 @@ Reply as JSON with exactly this shape:
   "nudge": "one short line that helps them show up for the next workout",
   "nextWorkout": "the id of the plan workout they should do next",
   "recommendations": [
-    { "exercise": "exact exercise name from that workout", "sets": [ { "kg": number or null, "reps": number or null, "secs": number or null } ], "note": "at most 10 words" }
+    { "exercise": "exact exercise name", "sets": 3, "kg": number or null, "reps": number or null, "secs": number or null, "note": "at most 8 words" }
   ],
-  "memory": ["up to 8 short facts worth remembering about this person for future sessions"]
+  "memory": ["up to 5 short facts worth remembering about this person for future sessions"]
 }
-Give one recommendation for every exercise in the next workout, then one for every other exercise that appears in recentSessions (people can also build their own workout). At most 12 in total. Keep every text field short. Use "secs" for timed exercises like planks, "kg": null for bodyweight exercises.
+"sets" is the number of sets; every set uses the same kg, reps and secs. Give one recommendation for every exercise in the next workout, then one for other exercises in recentSessions (people can also build their own workout). At most 10 in total. Keep every text field short. Use "secs" for timed exercises like planks, "kg": null for bodyweight exercises.
 
 DATA:
 ${JSON.stringify(data)}`;
+}
+
+// The model returns { sets: 3, kg, reps, secs }; the app expects sets as a list.
+function expandRec(r) {
+  if (!r || Array.isArray(r.sets)) return r;
+  const n = Math.min(Math.max(Math.round(Number(r.sets) || 3), 1), 6);
+  const one = { kg: r.kg ?? null, reps: r.reps ?? null, secs: r.secs ?? null };
+  return { exercise: r.exercise, note: r.note || '', sets: Array.from({ length: n }, () => ({ ...one })) };
 }
 
 function parseJSON(text) {
@@ -169,44 +185,53 @@ function validShape(mode, r) {
 
 /* ---------- retries ---------- */
 // Busy or rate-limited replies (429, 500, 503, 529) are retried once after a short pause,
-// then once more on AI_FALLBACK_MODEL if it is set. Kept short to fit the function time limit.
+// then once more on AI_FALLBACK_MODEL if it is set. Everything must finish before the deadline,
+// because Netlify cuts the function off (HTTP 504) if it runs too long.
 const RETRYABLE = new Set([429, 500, 503, 529, 'cut-off']);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
-async function callWithRetry(provider, system, user) {
+async function callWithRetry(provider, system, user, deadline = Date.now() + TIMEOUT_MS) {
   const models = [provider.model, provider.model, process.env.AI_FALLBACK_MODEL].filter(Boolean);
   let last;
   for (let i = 0; i < models.length; i++) {
+    const left = deadline - Date.now();
+    if (left < 1500) break;
     try {
-      return { text: await provider.callModel(models[i], system, user), model: models[i] };
+      return { text: await provider.callModel(models[i], system, user, AbortSignal.timeout(left)), model: models[i] };
     } catch (e) {
+      if (e?.name === 'TimeoutError' || e?.name === 'AbortError') throw providerError(provider.name, 'timeout', 'no reply in time');
       last = e;
       if (!RETRYABLE.has(e.status)) throw e;
-      if (i < models.length - 1) await sleep(i === 0 ? 1200 : 300);
+      if (i < models.length - 1) await sleep(i === 0 ? 800 : 300);
     }
   }
-  throw last;
+  throw last || providerError(provider.name, 'timeout', 'no reply in time');
 }
 const providerError = (name, status, body) => Object.assign(new Error(`${name} ${status}: ${String(body).slice(0, 200)}`), { status });
 
 /* ---------- providers ---------- */
 function pickProvider() {
   const want = (process.env.AI_PROVIDER || '').toLowerCase();
-  const has = { anthropic: process.env.ANTHROPIC_API_KEY, gemini: process.env.GEMINI_API_KEY, openai: process.env.OPENAI_API_KEY };
+  // CLAUDE_API_KEY is our own name for the Anthropic key. Netlify's AI Gateway can inject its own
+  // ANTHROPIC_API_KEY that only works through the gateway, so CLAUDE_API_KEY wins when both exist.
+  const clean = (v) => (v || '').trim().replace(/^["']|["']$/g, '') || undefined;
+  const has = { anthropic: clean(process.env.CLAUDE_API_KEY) || clean(process.env.ANTHROPIC_API_KEY), gemini: clean(process.env.GEMINI_API_KEY), openai: clean(process.env.OPENAI_API_KEY) };
   // Gemini first: Netlify's AI Gateway can inject ANTHROPIC_API_KEY / OPENAI_API_KEY
   // that only work through its own gateway URL, not the providers' public APIs.
   const order = ['gemini', 'anthropic', 'openai'];
   const name = want && has[want] ? want : order.find((k) => has[k]);
   if (!name) return null;
   const model = process.env.AI_MODEL || { anthropic: 'claude-haiku-5-5', gemini: 'gemini-3.8-flash', openai: 'gpt-4.1-mini' }[name];
-  return { name, model, callModel: (m, system, user) => PROVIDERS[name](has[name], m, system, user) };
+  const keyVar = name === 'anthropic' ? (clean(process.env.CLAUDE_API_KEY) ? 'CLAUDE_API_KEY' : 'ANTHROPIC_API_KEY') : `${name.toUpperCase()}_API_KEY`;
+  const keyHint = `${keyVar} …${String(has[name]).slice(-4)}`;
+  return { name, model, keyHint, callModel: (m, system, user, signal) => PROVIDERS[name](has[name], m, system, user, signal) };
 }
 
 const PROVIDERS = {
-  async anthropic(key, model, system, user) {
+  async anthropic(key, model, system, user, signal) {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
+      method: 'POST', signal,
       headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model, max_tokens: 4000, system, messages: [{ role: 'user', content: user }] }),
+      body: JSON.stringify({ model, max_tokens: 2500, system, messages: [{ role: 'user', content: user }] }),
     });
     if (!r.ok) throw providerError('anthropic', r.status, await r.text());
     const d = await r.json();
@@ -214,9 +239,9 @@ const PROVIDERS = {
     if (d.stop_reason === 'max_tokens' && !parseJSON(text)) throw providerError('anthropic', 'cut-off', 'reply ended early (max_tokens)');
     return text;
   },
-  async gemini(key, model, system, user) {
+  async gemini(key, model, system, user, signal) {
     const r = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(model)}:generateContent`, {
-      method: 'POST',
+      method: 'POST', signal,
       headers: { 'content-type': 'application/json', 'x-goog-api-key': key },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
@@ -232,9 +257,9 @@ const PROVIDERS = {
     if (c?.finishReason && c.finishReason !== 'STOP' && !parseJSON(text)) throw providerError('gemini', 'cut-off', `reply ended early (${c.finishReason})`);
     return text;
   },
-  async openai(key, model, system, user) {
+  async openai(key, model, system, user, signal) {
     const r = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
+      method: 'POST', signal,
       headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
       body: JSON.stringify({ model, max_tokens: 4000, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
     });
@@ -244,4 +269,4 @@ const PROVIDERS = {
   },
 };
 
-export const _test = { parseJSON, validShape, userMessage, pickProvider, callWithRetry };
+export const _test = { parseJSON, validShape, userMessage, pickProvider, callWithRetry, expandRec };
