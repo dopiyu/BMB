@@ -11,7 +11,7 @@
 //   AI_FALLBACK_MODEL   optional: second model to try when the main one is busy
 //   AI_USER_DAILY_LIMIT optional: requests per person per day (default 10)
 //   AI_DAILY_LIMIT      optional: requests for the whole app per day (default 300)
-//   AI_TIMEOUT_MS       optional: total time allowed for the AI reply (default 9500, under Netlify's function limit)
+//   AI_TIMEOUT_MS       optional: total time allowed for the AI reply (default 25000, under Netlify's function limit)
 //   FIREBASE_PROJECT_ID optional: defaults to bmb---pwa
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import { getStore } from '@netlify/blobs';
@@ -23,7 +23,7 @@ const JWKS = createRemoteJWKSet(new URL('https://www.googleapis.com/service_acco
 const USER_LIMIT = Number(process.env.AI_USER_DAILY_LIMIT) || 10;
 const APP_LIMIT = Number(process.env.AI_DAILY_LIMIT) || 300;
 const MODES = new Set(['analyze', 'onboard', 'ask']);
-const TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS) || 9500;
+const TIMEOUT_MS = Number(process.env.AI_TIMEOUT_MS) || 25000;
 
 const json = (status, body) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json', 'cache-control': 'no-store' } });
 const istDay = () => new Date(Date.now() + 5.5 * 3600e3).toISOString().slice(0, 10);
@@ -231,11 +231,15 @@ const PROVIDERS = {
     const r = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST', signal,
       headers: { 'x-api-key': key, 'anthropic-version': '2023-06-01', 'content-type': 'application/json' },
-      body: JSON.stringify({ model, max_tokens: 2500, system, messages: [{ role: 'user', content: user }] }),
+      // Claude 5.x models think before answering by default, which made reviews take 25s+.
+      // Our task is simple formatting of the person's data, so thinking is switched off.
+      body: JSON.stringify({ model, max_tokens: 2500, thinking: { type: 'disabled' }, system, messages: [{ role: 'user', content: user }] }),
     });
     if (!r.ok) throw providerError('anthropic', r.status, await r.text());
     const d = await r.json();
     const text = (d.content || []).filter((c) => c.type === 'text').map((c) => c.text).join('');
+    if (d.stop_reason === 'refusal') throw providerError('anthropic', 'refusal', 'the model declined this request');
+    console.log(`anthropic usage in=${d.usage?.input_tokens} out=${d.usage?.output_tokens} stop=${d.stop_reason}`);
     if (d.stop_reason === 'max_tokens' && !parseJSON(text)) throw providerError('anthropic', 'cut-off', 'reply ended early (max_tokens)');
     return text;
   },
