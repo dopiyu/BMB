@@ -442,3 +442,19 @@ svg.body .lab.sel text { font-weight: 700; }
 .more.open .more-head .chev { transform: rotate(180deg); }
 .more-body { padding: 0 14px 14px; display: flex; flex-direction: column; gap: 10px; }
 .more-body .card { border: 0; padding: 0; background: transparent; }
+
+/* ---------- v5: saved custom workouts ---------- */
+.saved { display: flex; flex-direction: column; gap: 10px; }
+.saved-h { margin: 6px 0 0; font-size: 12px; font-weight: 700; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+.saved-card { background: var(--surface); border: 1px solid var(--line); border-radius: 18px; padding: 14px 16px; display: flex; flex-direction: column; gap: 10px; }
+.saved-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; }
+.saved-top h3 { margin: 0 0 2px; font-size: 18px; overflow-wrap: anywhere; }
+.saved-top .link { flex: none; color: var(--muted); }
+.saved-top .link.bad { color: var(--bad); }
+.saved-lines { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.saved-lines li { display: flex; justify-content: space-between; gap: 10px; padding: 6px 0; border-top: 1px solid var(--line); font-size: 14px; }
+.saved-lines li span { min-width: 0; overflow-wrap: anywhere; }
+.saved-lines li b { font-weight: 600; white-space: nowrap; }
+.saved-card .btn .ic { width: 18px; height: 18px; }
+.wk-name { font-family: var(--display); font-weight: 800; font-size: 28px; text-transform: uppercase; line-height: 1.1; padding: 6px 10px; margin-top: 2px; }
+.wk-name::placeholder { color: var(--muted); opacity: .7; }

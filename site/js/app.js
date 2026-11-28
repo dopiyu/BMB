@@ -134,6 +134,28 @@ const label = (s) => s.workoutName || TYPE_LABEL[typeOf(s)] || 'Workout';
 const needsOnboarding = () => S.profileLoaded && !S.profile.onboarding?.done;
 const forcedOnboarding = () => needsOnboarding() && S.loaded && S.sessions.length === 0;
 const FREESTYLE = { id: 'freestyle', name: 'Your own workout', exercises: [] };
+// Custom workouts people built themselves, remembered in their profile (name, exercises, sets).
+const MAX_SAVED = 12;
+const savedWorkouts = () => (Array.isArray(S.profile.customWorkouts) ? S.profile.customWorkouts : [])
+  .filter((w) => w && w.id && Array.isArray(w.exercises) && w.exercises.length)
+  .sort((a, b) => (b.lastDone || '').localeCompare(a.lastDone || '') || (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+const defaultCustomName = (date) => `Custom workout · ${fShort(date)}`;
+async function rememberCustom(session, d) {
+  if (session.workoutId !== 'freestyle' || !session.exercises.length) return;
+  const list = Array.isArray(S.profile.customWorkouts) ? [...S.profile.customWorkouts] : [];
+  const id = d.customId || `cw${Date.now().toString(36)}`;
+  const old = list.find((w) => w.id === id);
+  // Editing an older session shouldn't overwrite a template that has been used since.
+  if (old && old.lastDone && old.lastDone > session.date) return;
+  const tpl = {
+    id, name: (d.customName || '').trim().slice(0, 40) || old?.name || defaultCustomName(session.date),
+    exercises: session.exercises.map((e) => ({ name: e.name, kind: e.kind, sets: e.sets.map((x) => ({ ...x })) })),
+    lastDone: session.date, updatedAt: new Date().toISOString(),
+  };
+  const next = [tpl, ...list.filter((w) => w.id !== id)]
+    .sort((a, b) => (b.lastDone || '').localeCompare(a.lastDone || '')).slice(0, MAX_SAVED);
+  try { await store.saveProfile({ customWorkouts: next }); S.profile = { ...S.profile, customWorkouts: next }; } catch {}
+}
 const workoutById = (id) => (id === 'freestyle' ? FREESTYLE : plan().workouts.find((w) => w.id === id) || null);
 const recommendedId = () => {
   const p = plan(); const c = coach();
@@ -146,7 +168,7 @@ const saveDraft = () => { try { localStorage.setItem(draftKey(), JSON.stringify(
 const clearDraft = () => { try { localStorage.removeItem(draftKey()); } catch {} };
 
 function newDraft(date = today()) {
-  return { date, workoutId: null, workoutName: '', status: 'in-progress', editingId: null, forceEdit: false,
+  return { date, workoutId: null, workoutName: '', customId: null, customName: '', status: 'in-progress', editingId: null, forceEdit: false,
     exercises: [], cardio: [{ type: 'Brisk walk', km: null, min: null }], notes: '' };
 }
 const blankEx = (name, kind) => ({ name, kind: kind || findEx(name)?.kind || 'weight', sets: [{}, {}, {}], saved: false });
@@ -169,6 +191,7 @@ function draftFromSession(s) {
   return {
     date: s.date, workoutId: s.workoutId || (plan().workouts.some((w) => w.id === typeOf(s)) ? typeOf(s) : 'freestyle'),
     workoutName: label(s), status: isPartial(s) ? 'in-progress' : 'complete', editingId: s.id, forceEdit: true,
+    customId: s.customId || null, customName: s.workoutId === 'freestyle' && s.workoutName !== FREESTYLE.name ? s.workoutName || '' : '',
     exercises: (s.exercises || []).map((e) => ({ name: e.name, kind: kindOf(e.name, e.sets), sets: (e.sets || []).map((x) => ({ ...x })), saved: true })),
     cardio: (s.cardio || []).length ? s.cardio.map((c) => ({ ...c })) : [{ type: 'Brisk walk', km: null, min: null }],
     notes: s.notes || '',
@@ -297,6 +320,7 @@ function chooser() {
       <span class="opt-chips">${mus.map((m) => `<i>${esc(m)}</i>`).join('')}</span>
       <span class="opt-cta">Start workout ${ic('chev')}</span>
     </button>
+    ${savedSection()}
     <button type="button" class="opt-card" data-act="startCustom">
       <span class="opt-title small">Create your own</span>
       <span class="opt-meta">Pick your exercises. ${coachOn() ? 'AI Coach suggests sets and reps from your history.' : 'New exercises get small starting values.'}</span>
@@ -307,6 +331,28 @@ function chooser() {
   ${!coachOn() ? `<button type="button" class="cta-coach" data-act="go" data-r="coach">${ic('ai')}<span><b>Enable AI Coach</b><small>Get sets, reps and weights picked for you after every workout</small></span>${ic('chev')}</button>` : ''}`;
 }
 
+function savedSection() {
+  const list = savedWorkouts();
+  if (!list.length) return '';
+  const shown = S.savedAll ? list : list.slice(0, 3);
+  const cards = shown.map((w) => {
+    const lines = w.exercises.slice(0, 4).map((e) => `<li><span>${esc(findEx(e.name)?.name || e.name)}</span><b>${esc(recSummary(e.kind || kindOf(e.name, e.sets), e.sets))}</b></li>`).join('');
+    const more = w.exercises.length > 4 ? `<li class="fine">+ ${w.exercises.length - 4} more</li>` : '';
+    const confirm = S.savedDel === w.id;
+    return `<article class="saved-card">
+      <div class="saved-top"><div><h3>${esc(w.name)}</h3><p class="fine">${w.exercises.length} exercise${w.exercises.length === 1 ? '' : 's'}${w.lastDone ? ` · last done ${fShort(w.lastDone)}` : ''}</p></div>
+        <button type="button" class="link small${confirm ? ' bad' : ''}" data-act="rmSaved" data-id="${esc(w.id)}">${confirm ? 'Tap again to remove' : 'Remove'}</button></div>
+      <ul class="saved-lines">${lines}${more}</ul>
+      <button type="button" class="btn block" data-act="startSaved" data-id="${esc(w.id)}">Do this again ${ic('chev')}</button>
+    </article>`;
+  }).join('');
+  return `<section class="saved" aria-label="Previous custom workouts">
+    <h2 class="saved-h">Previous custom workouts</h2>
+    ${cards}
+    ${list.length > 3 ? `<button type="button" class="link small" data-act="savedAll">${S.savedAll ? 'Show fewer' : `Show all ${list.length}`}</button>` : ''}
+  </section>`;
+}
+
 function workoutView() {
   const d = S.draft;
   const clash = S.sessions.find((s) => s.date === d.date && s.id !== d.editingId && !isPartial(s));
@@ -315,9 +361,10 @@ function workoutView() {
   const extras = d.cardio.some((c) => c.km != null || c.min != null) || (d.notes || '').trim();
   return `<section class="wk-head">
     <div class="wk-row">
-      <div><p class="eyebrow">${d.editingId && d.status === 'complete' ? 'Editing' : custom ? 'Created by you' : coachOn() ? 'Recommended by AI Coach' : 'Recommended'}</p><h2 class="h2">${esc(custom ? 'Your workout' : d.workoutName)}</h2></div>
+      <div><p class="eyebrow">${d.editingId && d.status === 'complete' ? 'Editing' : custom ? 'Created by you' : coachOn() ? 'Recommended by AI Coach' : 'Recommended'}</p>${custom ? `<label class="sr" for="d-wname">Workout name</label><input id="d-wname" class="wk-name" data-f="wname" maxlength="40" placeholder="Name this workout" value="${esc(d.customName || '')}">` : `<h2 class="h2">${esc(d.workoutName)}</h2>`}</div>
       ${!done && !d.editingId ? '<button type="button" class="btn small" data-act="switch">Change</button>' : ''}
     </div>
+    ${custom && !d.editingId ? `<p class="fine">${d.customId ? 'Your numbers from last time are filled in. Change anything, then save each exercise.' : 'Give it a name and it\'ll be saved under Previous custom workouts for next time.'}</p>` : ''}
     ${total ? `<div class="wk-prog"><div class="ob-bar"><i style="width:${(done / total) * 100}%"></i></div><span class="fine">${done} of ${total} done</span></div>` : ''}
     ${dateLine()}
   </section>
@@ -811,7 +858,9 @@ async function persist(status) {
   const cardio = d.cardio.filter((c) => c.km != null || c.min != null).map((c) => ({ type: (c.type || 'Cardio').trim() || 'Cardio', km: c.km ?? null, min: c.min ?? null }));
   const existing = S.sessions.find((s) => s.id === d.date);
   const session = {
-    id: d.date, date: d.date, workoutId: d.workoutId, workoutName: d.workoutName,
+    id: d.date, date: d.date, workoutId: d.workoutId,
+    workoutName: d.workoutId === 'freestyle' ? ((d.customName || '').trim().slice(0, 40) || FREESTYLE.name) : d.workoutName,
+    ...(d.workoutId === 'freestyle' ? { customId: d.customId || (d.customId = `cw${Date.now().toString(36)}`) } : {}),
     type: classify({ exercises }), status, exercises, cardio, notes: (d.notes || '').trim(),
     coached: status === 'complete' ? !!(existing && existing.coached && existing.status !== 'in-progress' && d.editingId) : false,
     updatedAt: new Date().toISOString(),
@@ -853,6 +902,7 @@ async function finishWorkout() {
   S.saving = true; render();
   try {
     const session = await persist('complete');
+    await rememberCustom(session, d);
     clearDraft();
     S.draft = newDraft();
     const latest = sorted().filter((s) => !isPartial(s) || s.id === session.id)[0];
@@ -896,7 +946,24 @@ app.addEventListener('click', async (ev) => {
     // home
     case 'startRec': pickWorkout(recommendedId()); d.open = 0; S.exErr = {}; break;
     case 'startCustom': pickWorkout('freestyle'); d.open = -1; S.exErr = {}; saveDraft(); render(); S.sheet = { q: '' }; renderSheet(); setTimeout(() => document.getElementById('sheet-q')?.focus(), 50); return;
-    case 'switch': d.workoutId = null; d.workoutName = ''; d.exercises = d.exercises.filter((e) => e.saved); d.open = -1; S.exErr = {}; break;
+    case 'startSaved': {
+      const w = savedWorkouts().find((x) => x.id === b.dataset.id); if (!w) return;
+      d.workoutId = 'freestyle'; d.workoutName = w.name; d.customId = w.id; d.customName = w.name;
+      const have = new Set(d.exercises.filter((e) => e.saved).map((e) => canon(e.name)));
+      d.exercises = [...d.exercises.filter((e) => e.saved), ...w.exercises.filter((e) => !have.has(canon(e.name)))
+        .map((e) => ({ name: e.name, kind: e.kind || kindOf(e.name, e.sets), sets: (e.sets || []).map((x) => ({ ...x })), saved: false }))];
+      d.open = d.exercises.findIndex((e) => !e.saved); S.exErr = {}; S.savedDel = null; window.scrollTo({ top: 0 }); break;
+    }
+    case 'rmSaved': {
+      const id = b.dataset.id;
+      if (S.savedDel !== id) { S.savedDel = id; render(); return; }
+      S.savedDel = null;
+      const next = (S.profile.customWorkouts || []).filter((w) => w.id !== id);
+      try { await store.saveProfile({ customWorkouts: next }); S.profile = { ...S.profile, customWorkouts: next }; toast('Removed'); } catch { toast('Couldn\'t remove. Try again.', 'bad'); }
+      render(); return;
+    }
+    case 'savedAll': S.savedAll = !S.savedAll; render(); return;
+    case 'switch': d.customId = null; d.customName = ''; d.workoutId = null; d.workoutName = ''; d.exercises = d.exercises.filter((e) => e.saved); d.open = -1; S.exErr = {}; break;
     case 'openEx': d.open = d.open === i ? -1 : i; saveDraft(); render(); document.querySelectorAll('.ex-row')[i]?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return;
     case 'toggleMore': S.moreOpen = !S.moreOpen; break;
     case 'pickDate': S.dateOpen = true; render(); setTimeout(() => { const el = document.getElementById('d-date'); el?.focus(); try { el?.showPicker?.(); } catch {} }, 30); return;
@@ -934,6 +1001,7 @@ app.addEventListener('click', async (ev) => {
     case 'partialToCoach': {
       const s = S.sessions.find((x) => x.id === b.dataset.id); if (!s) return;
       try { await store.save({ ...s, status: 'complete', updatedAt: new Date().toISOString() }); } catch { toast('Couldn\'t update. Try again.', 'bad'); return; }
+      await rememberCustom(s, { customId: s.customId, customName: s.workoutName === FREESTYLE.name ? '' : s.workoutName });
       runCoach('analyze', { justFinished: s.id }); return;
     }
     // history & progress
@@ -1004,6 +1072,7 @@ app.addEventListener('input', (ev) => {
     const c = d.cardio[i]; const p = document.getElementById(`pace${i}`);
     if (p) p.textContent = c.km && c.min ? `${round1(c.km / (c.min / 60))} km/h${c.km / (c.min / 60) >= 5.5 ? ' · brisk' : ' · speed up to 5.5+'}` : 'Brisk is 5.5 to 6.5 km/h';
   } else if (f === 'notes') d.notes = t.value;
+  else if (f === 'wname') d.customName = t.value;
   else return;
   S.formErr = '';
   saveDraft();
